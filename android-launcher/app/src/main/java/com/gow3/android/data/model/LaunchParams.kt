@@ -93,7 +93,7 @@ internal object LaunchParams {
                 LaunchOption("1800p", R.string.param_option_1800p),
                 LaunchOption("4K", R.string.param_option_4k),
             ),
-            // 移动端优化默认值：720p 内部分辨率 + FSR 升采样，手机/平板上更流畅省电。
+            // 移动端默认 720p 内部分辨率，超分与锐化默认关闭。
             // 与 tools/android/config/gow3-default.ini 保持一致。
             defaultValue = "720p",
             descriptionRes = R.string.param_desc_render_patch,

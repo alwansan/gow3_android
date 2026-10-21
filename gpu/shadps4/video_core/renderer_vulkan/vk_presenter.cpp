@@ -16,6 +16,7 @@
 #include "gow3_overlay.h"
 #include "gow3_settings.h"
 #include "gow3_graphics.h"
+#include "gow3_mobile_policy.h"
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
 #include "video_core/renderer_vulkan/vk_framegen_barriers.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
@@ -552,11 +553,25 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     }
     expected_ratio = static_cast<float>(image_size.width) / static_cast<float>(image_size.height);
 
-    // gow3: FSR 1, RCAS and its strength come from the in-game menu, every frame.
+    // Android 使用启动器的有效开关门控旧后处理，不能被历史 rcas=1 静默重新开启。
     const auto& graphics = Gow3Settings::Get();
-    fsr_settings.enable = graphics.fsr1;
-    fsr_settings.use_rcas = graphics.rcas;
+    const bool android = Gow3Mobile::Android();
+    const bool upscaler_enabled = graphics.upscaler != Gow3Settings::UpscalerOff;
+    const bool sharpen_enabled = graphics.sharpen;
+    const auto legacy_fsr = Gow3Graphics::ResolveLegacyFsrOptions(
+        android, upscaler_enabled, sharpen_enabled, graphics.fsr1, graphics.rcas);
+    fsr_settings.enable = legacy_fsr.fsr1;
+    fsr_settings.use_rcas = legacy_fsr.rcas;
     fsr_settings.rcas_attenuation = Gow3Graphics::RcasAttenuation(graphics.rcas_strength);
+    if (android) {
+        static const bool logged = [&] {
+            std::printf("Android postprocess: initial FSR1=%d RCAS=%d (upscaler=%s sharpen=%d)\n",
+                        int(legacy_fsr.fsr1), int(legacy_fsr.rcas),
+                        Gow3Settings::UpscalerName(graphics.upscaler), int(sharpen_enabled));
+            return true;
+        }();
+        (void)logged;
+    }
     Gow3Settings::Get().image_width = int(image_size.width);
     Gow3Settings::Get().image_height = int(image_size.height);
     Gow3Settings::Get().window_width = int(frame->width);

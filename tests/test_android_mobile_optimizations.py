@@ -41,6 +41,91 @@ def build(source, directory, name, extra=()):
 
 @unittest.skipUnless(shutil.which("c++") and os.name == "posix", "POSIX C++ compiler required")
 class AndroidMobileOptimizationTest(unittest.TestCase):
+    def test_android_disabled_controls_bypass_legacy_fsr(self):
+        source = r'''
+#include <cassert>
+#include <fstream>
+#include "gow3_graphics.h"
+#include "gow3_settings.h"
+int main(int argc, char** argv) {
+    assert(argc == 2);
+    using namespace Gow3Graphics;
+    for (bool android : {false, true}) {
+        for (bool upscaler : {false, true}) {
+            for (bool sharpen : {false, true}) {
+                for (bool fsr1 : {false, true}) {
+                    for (bool rcas : {false, true}) {
+                        const auto policy = ResolveLegacyFsrOptions(android, upscaler, sharpen, fsr1, rcas);
+                        if (!android) {
+                            assert(policy.fsr1 == fsr1 && policy.rcas == rcas);
+                        } else if (!upscaler) {
+                            assert(!policy.fsr1 && !policy.rcas);
+                            assert(!FsrPassRuns(policy.fsr1, policy.rcas, 960, 540, 960, 540));
+                            assert(!FsrPassRuns(policy.fsr1, policy.rcas, 960, 540, 1280, 720));
+                            assert(!FsrPassRuns(policy.fsr1, policy.rcas, 1920, 1080, 960, 540));
+                        } else {
+                            assert(policy.fsr1 == fsr1);
+                            assert(policy.rcas == (rcas && sharpen));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    unsetenv("GOW3_ANDROID_INPUT"); unsetenv("GOW3_ANDROID_PORT");
+    unsetenv("GOW3_UPSCALER"); unsetenv("GOW3_FSR1"); unsetenv("GOW3_RCAS");
+    setenv("GOW3_CONFIG", argv[1], 1);
+    std::ofstream(argv[1]) << "";
+    auto& settings = Gow3Settings::Get();
+    Gow3Settings::Load();
+    assert(settings.rcas && settings.sharpen);
+    setenv("GOW3_ANDROID_INPUT", "1", 1);
+    Gow3Settings::Load();
+    assert(settings.upscaler == Gow3Settings::UpscalerOff);
+    assert(!settings.sharpen && !settings.fsr1 && !settings.rcas);
+    std::ofstream(argv[1]) << "upscaler=off\nsharpen=0\nfsr1=1\nrcas=1\n";
+    Gow3Settings::Load();
+    assert(settings.fsr1 && settings.rcas);
+    const auto current = [&] {
+        return ResolveLegacyFsrOptions(true, settings.upscaler != Gow3Settings::UpscalerOff,
+                                       settings.sharpen, settings.fsr1, settings.rcas);
+    };
+    auto policy = current();
+    assert(!policy.fsr1 && !policy.rcas);
+    setenv("GOW3_FSR1", "1", 1); setenv("GOW3_RCAS", "1", 1);
+    Gow3Settings::Load();
+    policy = current();
+    assert(!policy.fsr1 && !policy.rcas);
+    settings.upscaler = Gow3Settings::UpscalerFsr3;
+    settings.sharpen = true;
+    policy = current();
+    assert(policy.fsr1 && policy.rcas);
+    settings.sharpen = false;
+    policy = current();
+    assert(!policy.rcas);
+    settings.upscaler = Gow3Settings::UpscalerOff;
+    policy = current();
+    assert(!policy.fsr1 && !policy.rcas);
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            exe = build(source, directory, "android_postprocess",
+                        (str(ROOT / "gpu/shim/gow3_settings.cpp"),))
+            checked([str(exe), str(Path(directory) / "settings.ini")])
+
+    def test_android_postprocess_policy_gates_creation_and_recording(self):
+        cpp = (INCLUDES / "video_core/renderer_vulkan/vk_presenter.cpp").read_text()
+        start = cpp.index("    const auto legacy_fsr = Gow3Graphics::ResolveLegacyFsrOptions(")
+        end = cpp.index("    // Vulkan has no sRGB", start)
+        body = cpp[start:end]
+        self.assertIn("fsr_settings.enable = legacy_fsr.fsr1;", body)
+        self.assertIn("fsr_settings.use_rcas = legacy_fsr.rcas;", body)
+        self.assertLess(body.index("if (fsr_runs) {"), body.index("fsr_pass.Create("))
+        self.assertLess(body.index("if (fsr_runs) {"), body.index("fsr_pass.Render("))
+        defaults = (ROOT / "tools/android/config/gow3-default.ini").read_text().splitlines()
+        for key in ("upscaler=off", "sharpen=0", "fsr1=0", "rcas=0"):
+            self.assertIn(key, defaults)
+
     def test_empty_readbacks_skip_host_wait_but_still_retire(self):
         cpp = (INCLUDES / "video_core/texture_cache/texture_cache.cpp").read_text()
         body = cpp[cpp.index("void TextureCache::ProcessDownloadImages()"):]
