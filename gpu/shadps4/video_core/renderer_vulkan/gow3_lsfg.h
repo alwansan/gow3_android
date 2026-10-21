@@ -44,6 +44,7 @@
 #include "gow3_lsfg_state.h"
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
+#include "video_core/renderer_vulkan/framegen_policy.h"
 
 struct AHardwareBuffer;
 
@@ -89,7 +90,7 @@ public:
     /// frame generation failed and is off from now on. Output(i) is valid for i below the count.
     /// `latency_id`: gow3port 未移植 BB 的逐级延迟记录，恒传 0（no-op）。
     int ProcessFrame(Scheduler& scheduler, vk::Image image, u32 width, u32 height, vk::Semaphore ready,
-                     u64 ready_tick, u64 latency_id = 0);
+                     u64 ready_tick, bool generate = true, u64 latency_id = 0);
     const Output& GetOutput(u32 index) const {
         return outputs[index];
     }
@@ -102,6 +103,9 @@ public:
     /// gow3port：HUD 遥测速率（change add-native-frame-generation）。自上次查询满 1s 时
     /// 用新窗口重算并返回 true；不足 1s 返回上次值（首窗返回 false）。presented 含生成帧。
     bool Rates(double* source_fps, double* presented_fps);
+    void DiscardOutput(Scheduler& scheduler, u32 index);
+    void PrepareOutput(u32 index);
+    vk::Format SharedFormat() const { return static_cast<vk::Format>(shared_format); }
 
 private:
     struct Api;
@@ -136,6 +140,8 @@ private:
     double interval_ms = 33.3;
     std::chrono::steady_clock::time_point last_frame{};
     std::array<Output, 3> outputs{};
+    std::array<bool, 3> output_pending{};
+    Framegen::SyncMode input_sync = Framegen::SyncModeFromEnv("GOW3_LSFG_INPUT_SYNC");
     // Game-device synchronization objects.
     //
     // Chained (the default with sync files; GOW3_LSFG_CHAIN=0: the old CPU waits): nothing on the

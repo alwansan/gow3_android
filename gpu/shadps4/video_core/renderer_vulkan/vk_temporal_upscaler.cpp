@@ -4,6 +4,7 @@
 #include "video_core/renderer_vulkan/motion_history.h"
 #include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/renderer_vulkan/ui_composition.h"
+#include "video_core/renderer_vulkan/framegen_policy.h"
 
 #include <algorithm>
 #include <cmath>
@@ -22,6 +23,7 @@
 #include "video_core/host_shaders/taa_comp.h"
 #include "video_core/host_shaders/taa_sharpen_comp.h"
 #include "video_core/host_shaders/taa_sharpen_ldr_comp.h"
+#include "video_core/host_shaders/taa_sharpen_half_comp.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
@@ -648,6 +650,7 @@ void TemporalUpscaler::CreatePipelines() {
     storage_layout(2, taa_sharpen_desc_layout, taa_sharpen_pipeline_layout, sizeof(float));
     taa_sharpen_pipeline = compute(TAA_SHARPEN_COMP, *taa_sharpen_pipeline_layout);
     taa_sharpen_ldr_pipeline = compute(TAA_SHARPEN_LDR_COMP, *taa_sharpen_pipeline_layout);
+    extra_sharpen_half_pipeline = compute(TAA_SHARPEN_HALF_COMP, *taa_sharpen_pipeline_layout);
     {
         std::array<vk::DescriptorSetLayoutBinding, 7> bindings{};
         for (u32 i = 0; i < bindings.size(); ++i) {
@@ -780,14 +783,19 @@ void TemporalUpscaler::ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, 
         return;
     }
     const auto device = instance.GetDevice();
-    if (extra_sharpen_width != w || extra_sharpen_height != h) {
+    static const bool half_input = Framegen::Enabled("GOW3_SHARPEN_FP16_INPUT");
+    const bool use_half = half_input && !ldr;
+    const auto scratch_format = use_half ? vk::Format::eR16G16B16A16Sfloat
+                                         : vk::Format::eR32G32B32A32Sfloat;
+    if (extra_sharpen_width != w || extra_sharpen_height != h ||
+        extra_sharpen_format != scratch_format) {
         // Retired command buffers may still read the old copy. `cmdbuf` stays open.
         scheduler.WaitSubmitted();
         extra_sharpen_view.reset();
         extra_sharpen_image = VideoCore::UniqueImage(device, instance.GetAllocator());
         extra_sharpen_image.Create(vk::ImageCreateInfo{
             .imageType = vk::ImageType::e2D,
-            .format = vk::Format::eR32G32B32A32Sfloat,
+            .format = scratch_format,
             .extent = {w, h, 1},
             .mipLevels = 1, .arrayLayers = 1, .samples = vk::SampleCountFlagBits::e1,
             .tiling = vk::ImageTiling::eOptimal,
@@ -796,11 +804,12 @@ void TemporalUpscaler::ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, 
         });
         extra_sharpen_view = Check(device.createImageViewUnique({
             .image = vk::Image(extra_sharpen_image), .viewType = vk::ImageViewType::e2D,
-            .format = vk::Format::eR32G32B32A32Sfloat,
+            .format = scratch_format,
             .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
         }));
         extra_sharpen_width = w;
         extra_sharpen_height = h;
+        extra_sharpen_format = scratch_format;
     }
     vk::ImageView target_view = *output_view;
     if (ldr) {
@@ -826,22 +835,32 @@ void TemporalUpscaler::ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, 
     };
     constexpr auto all = vk::PipelineStageFlagBits2::eAllCommands;
     constexpr auto rw = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
-    image_barrier(target, vk::ImageLayout::eGeneral, all, rw, vk::PipelineStageFlagBits2::eBlit,
+    const auto transfer_stage = use_half ? vk::PipelineStageFlagBits2::eCopy
+                                         : vk::PipelineStageFlagBits2::eBlit;
+    image_barrier(target, vk::ImageLayout::eGeneral, all, rw, transfer_stage,
                   vk::AccessFlagBits2::eTransferRead);
     image_barrier(vk::Image(extra_sharpen_image), vk::ImageLayout::eUndefined, all, rw,
-                  vk::PipelineStageFlagBits2::eBlit, vk::AccessFlagBits2::eTransferWrite);
+                  transfer_stage, vk::AccessFlagBits2::eTransferWrite);
     const vk::ImageBlit region{
         .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
         .srcOffsets = std::array{vk::Offset3D{}, vk::Offset3D{s32(w), s32(h), 1}},
         .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
         .dstOffsets = std::array{vk::Offset3D{}, vk::Offset3D{s32(w), s32(h), 1}},
     };
-    cmdbuf.blitImage(target, vk::ImageLayout::eGeneral, vk::Image(extra_sharpen_image),
-                     vk::ImageLayout::eGeneral, region, vk::Filter::eNearest);
+    if (use_half) {
+        cmdbuf.copyImage(target, vk::ImageLayout::eGeneral, vk::Image(extra_sharpen_image),
+                         vk::ImageLayout::eGeneral,
+                         vk::ImageCopy{.srcSubresource = region.srcSubresource,
+                                       .dstSubresource = region.dstSubresource,
+                                       .extent = {w, h, 1}});
+    } else {
+        cmdbuf.blitImage(target, vk::ImageLayout::eGeneral, vk::Image(extra_sharpen_image),
+                         vk::ImageLayout::eGeneral, region, vk::Filter::eNearest);
+    }
     image_barrier(vk::Image(extra_sharpen_image), vk::ImageLayout::eGeneral,
-                  vk::PipelineStageFlagBits2::eBlit, vk::AccessFlagBits2::eTransferWrite,
+                  transfer_stage, vk::AccessFlagBits2::eTransferWrite,
                   vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderStorageRead);
-    image_barrier(target, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eBlit,
+    image_barrier(target, vk::ImageLayout::eGeneral, transfer_stage,
                   vk::AccessFlagBits2::eTransferRead, vk::PipelineStageFlagBits2::eComputeShader,
                   vk::AccessFlagBits2::eShaderStorageWrite);
     const std::array<vk::DescriptorImageInfo, 2> infos{{
@@ -852,7 +871,8 @@ void TemporalUpscaler::ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, 
         writes[i] = {.dstBinding = i, .descriptorCount = 1,
             .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &infos[i]};
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute,
-                        ldr ? *taa_sharpen_ldr_pipeline : *taa_sharpen_pipeline);
+                        use_half ? *extra_sharpen_half_pipeline
+                                 : ldr ? *taa_sharpen_ldr_pipeline : *taa_sharpen_pipeline);
     cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *taa_sharpen_pipeline_layout, 0,
                                 writes);
     cmdbuf.pushConstants(*taa_sharpen_pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
@@ -1958,13 +1978,19 @@ bool TemporalUpscaler::RedirectSampled(VideoCore::ImageId image,
     return true;
 }
 
-bool TemporalUpscaler::DisplayOverride(VAddr address, Display& display) {
+bool TemporalUpscaler::DisplayOverride(VAddr address, Display& display, vk::Format view_format) {
     std::scoped_lock lock{display_mutex};
     const auto it = displays.find(address);
     if (it == displays.end() || !it->second.valid) {
         return false;
     }
     display = {vk::Image(it->second.image), it->second.format, it->second.width, it->second.height};
+    static const bool cache_view = Framegen::Enabled("GOW3_DISPLAY_VIEW_CACHE");
+    if (cache_view) {
+        display.view = Mirror(display.image, it->second.views, view_format,
+                              {vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity,
+                               vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eOne});
+    }
     // Diagnostic capture of the actual completed display buffer, including native UI.
     // GOW3_PRESENT_DUMP_COUNT=N: the trigger dumps N consecutive frames (temporal stability).
     static const char* dump = std::getenv("GOW3_PRESENT_DUMP_TRIGGER");
