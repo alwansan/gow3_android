@@ -27,6 +27,16 @@ extern "C" void gow3_cheat_status(unsigned id) {
     }
 }
 
+/// Automatic QTE (src/qte_hook.h): the menu's flag the 5 prompt stubs read.
+extern "C" uintptr_t gow3_auto_qte_flag(void) {
+    static_assert(sizeof(std::atomic<bool>) == 1 && std::atomic<bool>::is_always_lock_free);
+    return reinterpret_cast<uintptr_t>(&Gow3Settings::Get().auto_qte);
+}
+
+extern "C" void gow3_qte_status(int supported) {
+    Gow3Settings::Get().qte_supported = supported != 0 ? 1 : 0;
+}
+
 extern "C" void gow3_orbs_status(int supported) {
     Gow3Settings::Get().red_orbs_supported = supported != 0;
 }

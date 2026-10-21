@@ -16,6 +16,12 @@ public interface GameDrawerCallbacks {
     void onEditControllerLayout();
     void onResetControllerLayout();
 
+    /** 金手指：写入一组 cheat_* 键（ini key 即运行时 gow3_settings.cpp 的 cheat_keys）。
+     *  启动后下一次重启生效（hook 在 guest 首次执行前读取）。返回是否写盘成功。 */
+    boolean applyCheats(java.util.Map<String, String> updates);
+    /** 当前 cheat_* 键的值（缺失时为默认 "0"）。 */
+    java.util.Map<String, String> cheatStates();
+
     boolean isFrameGenDllPresent();
     FrameGenSettings.Config frameGenConfig();
     boolean isPerfHudEnabled();

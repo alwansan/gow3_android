@@ -64,6 +64,9 @@ struct Values {
     std::atomic<bool> damage_supported{false}, orb_pickup_supported{false};
     std::atomic<bool> cheats[GOW3_CHEAT_COUNT]{};
     std::atomic<uint32_t> cheats_supported{0};
+    /// Automatic QTE (src/qte_hook.h): the 5 prompt sites answer "passed" while set.
+    std::atomic<bool> auto_qte{false};
+    std::atomic<uint32_t> qte_supported{0};
     /// Damage hook (src/actor_hook.h): enemy health bar, off by default.
     std::atomic<bool> enemy_health_bar{false};
     std::atomic<bool> actor_watch_supported{false};
