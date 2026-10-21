@@ -216,6 +216,12 @@ private:
     AmdGpu::Liverpool* liverpool;
     DescriptorHeap desc_heap;
     vk::UniquePipelineCache pipeline_cache;
+    struct DriverCacheState;
+    std::unique_ptr<DriverCacheState> driver_cache;
+    std::vector<u8> LoadDriverCache();
+    void StartDriverCache();
+    void StopDriverCache();
+    void SaveDriverCache();
     vk::UniquePipelineLayout pipeline_layout;
     Shader::Profile profile{};
     Shader::Pools pools;

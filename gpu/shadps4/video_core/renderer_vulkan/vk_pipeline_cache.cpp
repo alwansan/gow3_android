@@ -10,7 +10,12 @@
 #include <ranges>
 #include <string>
 #include <unordered_set>
+#include <condition_variable>
+#include <thread>
+#include "common/elf_info.h"
+#include "video_core/renderer_vulkan/driver_cache_file.h"
 #include "gow3_threads.h"
+#include "gow3_mobile_policy.h"
 
 #include "common/hash.h"
 #include "common/thread.h"
@@ -320,6 +325,107 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(PipelineSelection& se
     return info;
 }
 
+// 改编自 Daedalus 239b7df；缓存快照不占用 GPU 命令线程。
+struct PipelineCache::DriverCacheState {
+    DriverCacheFile::Identity identity;
+    std::filesystem::path directory;
+    std::mutex mutex;
+    std::condition_variable_any wake;
+    std::jthread worker;
+    std::vector<vk::PipelineCache> caches;
+    std::vector<u64> saved_hashes;
+    std::filesystem::path File(size_t index) const {
+        return directory / (std::to_string(index) + ".bin");
+    }
+    void Stop() {
+        if (worker.joinable()) { worker.request_stop(); wake.notify_all(); worker.join(); }
+    }
+    ~DriverCacheState() { Stop(); }
+    void Save(vk::Device device) {
+        std::scoped_lock lock{mutex};
+        const auto& api = VULKAN_HPP_DEFAULT_DISPATCHER;
+        for (size_t index = 0; index < caches.size(); ++index) {
+            size_t size = 0;
+            auto result = api.vkGetPipelineCacheData(device, caches[index], &size, nullptr);
+            if (result != VK_SUCCESS || size < 32 || size > DriverCacheFile::MaxBytes) continue;
+            std::vector<u8> bytes(size);
+            result = api.vkGetPipelineCacheData(device, caches[index], &size, bytes.data());
+            // 编译线程可能扩大缓存；不完整快照留待下一轮重试。
+            if (result != VK_SUCCESS || size > bytes.size()) continue;
+            bytes.resize(size);
+            const u64 hash = DriverCacheFile::Checksum(bytes);
+            if (saved_hashes[index] == hash) continue;
+            if (DriverCacheFile::Save(File(index), bytes, identity)) {
+                saved_hashes[index] = hash;
+                std::printf("Driver pipeline cache: saved %zu bytes (slot %zu)\n", size, index);
+            }
+        }
+    }
+};
+
+std::vector<u8> PipelineCache::LoadDriverCache() {
+    // 只补足无法持久化 pipeline binary 的 Android 驱动，不替换现有 shader 缓存。
+    if (!Gow3Mobile::Android() || !EmulatorSettings.IsPipelineCacheEnabled() ||
+        instance.GetPipelineBinaryGlobalKey().keySize ||
+        !Gow3Mobile::Enabled("GOW3_DRIVER_CACHE")) return {};
+    try {
+        driver_cache = std::make_unique<DriverCacheState>();
+        auto& state = *driver_cache;
+        state.identity = {instance.GetVendorID(), instance.GetDeviceID(), instance.GetDriverVersion(), {}};
+        const auto uuid = instance.GetPipelineCacheUUID();
+        std::copy(uuid.begin(), uuid.end(), state.identity.uuid.begin());
+        const auto key = fmt::format("{:x}-{:x}-{:x}-{:016x}", state.identity.vendor,
+            state.identity.device, state.identity.driver, DriverCacheFile::Checksum(state.identity.uuid));
+        state.directory = Common::FS::GetUserPath(Common::FS::PathType::CacheDir) /
+            Common::ElfInfo::Instance().GameSerial() / "driver-v1" / key;
+        return DriverCacheFile::Load(state.File(0), state.identity);
+    } catch (...) {
+        driver_cache.reset();
+        return {};
+    }
+}
+
+void PipelineCache::StartDriverCache() {
+    if (!driver_cache) return;
+    auto& state = *driver_cache;
+    const auto device = instance.GetDevice();
+    // 检查点启动前合并上次会话的 worker 快照，涵盖显式指定的最多六个编译线程。
+    for (size_t index = 1; index <= 6; ++index) {
+        const auto bytes = DriverCacheFile::Load(state.File(index), state.identity);
+        if (bytes.empty()) continue;
+        const auto info = vk::PipelineCacheCreateInfo{
+            .initialDataSize = bytes.size(), .pInitialData = bytes.data()};
+        auto [result, cache] = device.createPipelineCacheUnique(info);
+        if (result == vk::Result::eSuccess) {
+            const auto merged = device.mergePipelineCaches(*pipeline_cache, *cache);
+            if (merged != vk::Result::eSuccess) LOG_WARNING(Render_Vulkan, "Driver cache merge rejected");
+        }
+    }
+    state.caches.push_back(*pipeline_cache);
+    for (const auto& cache : worker_pipeline_caches) state.caches.push_back(*cache);
+    state.saved_hashes.resize(state.caches.size());
+    state.worker = std::jthread([this, &state](std::stop_token stop) {
+        Common::SetCurrentThreadName("gow3:DriverCache");
+        Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+        std::mutex wait_mutex;
+        std::unique_lock lock{wait_mutex};
+        while (!stop.stop_requested()) {
+            state.wake.wait_for(lock, stop, std::chrono::seconds(30), [] { return false; });
+            if (!stop.stop_requested()) SaveDriverCache();
+        }
+    });
+}
+
+void PipelineCache::StopDriverCache() {
+    if (driver_cache) driver_cache->Stop();
+}
+
+void PipelineCache::SaveDriverCache() {
+    if (!driver_cache) return;
+    try { driver_cache->Save(instance.GetDevice()); }
+    catch (...) { LOG_WARNING(Render_Vulkan, "Driver pipeline cache checkpoint skipped"); }
+}
+
 PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
                              AmdGpu::Liverpool* liverpool_, u32 sparse_page_shift)
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
@@ -389,23 +495,42 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .supports_shader_stencil_export = instance_.IsShaderStencilExportSupported(),
     };
 
-    auto [cache_result, cache] = instance.GetDevice().createPipelineCacheUnique({});
+    const auto driver_data = LoadDriverCache();
+    const auto driver_info = vk::PipelineCacheCreateInfo{
+        .initialDataSize = driver_data.size(),
+        .pInitialData = driver_data.empty() ? nullptr : driver_data.data()};
+    auto created_cache = instance.GetDevice().createPipelineCacheUnique(driver_info);
+    if (!driver_data.empty()) {
+        if (created_cache.result == vk::Result::eSuccess) {
+            std::printf("Driver pipeline cache: loaded %zu bytes\n", driver_data.size());
+        } else {
+            LOG_WARNING(Render_Vulkan, "Driver cache rejected; creating an empty cache");
+            created_cache = instance.GetDevice().createPipelineCacheUnique({});
+        }
+    }
+    auto [cache_result, cache] = std::move(created_cache);
     ASSERT_MSG(cache_result == vk::Result::eSuccess, "Failed to create pipeline cache: {}",
                vk::to_string(cache_result));
     pipeline_cache = std::move(cache);
     // gow3: the compiler threads always exist; the in-game menu switches async compilation live
     // (Gow3Settings::async_shaders, GOW3_ASYNC_SHADERS at start).
     {
-        const auto count = std::clamp(Gow3Threads::Available() / 2, 1u, 6u);
-        const auto capture_count = std::min(2u, std::max(1u, Gow3Threads::Available() / 4));
+        const bool mobile = Gow3Mobile::Android();
+        const auto count = Gow3Mobile::WorkerOverride("GOW3_GPU_COMPILER_WORKERS",
+            Gow3Mobile::CompilerWorkers(mobile, std::clamp(Gow3Threads::Available() / 2, 1u, 6u)));
+        const auto capture_count = Gow3Mobile::CaptureWorkers(
+            mobile, std::min(2u, std::max(1u, Gow3Threads::Available() / 4)));
+        std::printf("GPU CPU budget: compile=%u capture=%u android=%d\n",
+                    count, capture_count, int(mobile));
         for (unsigned i = 0; i < count; ++i) {
             auto [result, worker_cache] = instance.GetDevice().createPipelineCacheUnique({});
             ASSERT_MSG(result == vk::Result::eSuccess, "Failed to create compiler pipeline cache");
             worker_pipeline_caches.push_back(std::move(worker_cache));
         }
-        capture_compiler = std::make_unique<AsyncCompiler>(capture_count, 8, [](unsigned index) {
+        capture_compiler = std::make_unique<AsyncCompiler>(capture_count, 8, [mobile](unsigned index) {
             Common::SetCurrentThreadName(("gow3:ShaderCapture" + std::to_string(index)).c_str());
-            Common::SetCurrentThreadPriority(Common::ThreadPriority::High);
+            Common::SetCurrentThreadPriority(mobile ? Common::ThreadPriority::Low
+                                                    : Common::ThreadPriority::High);
         });
         compiler = std::make_unique<AsyncCompiler>(count, 64, [](unsigned index) {
             Common::SetCurrentThreadName(("gow3:ShaderCompile" + std::to_string(index)).c_str());
@@ -414,11 +539,14 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         LOG_INFO(Render_Vulkan, "gow3: async graphics compilation ready ({} capture, {} compile workers)",
                  capture_count, count);
     }
+    StartDriverCache();
 }
 
 PipelineCache::~PipelineCache() {
+    StopDriverCache();
     StopWarmUp();
     FinishCompilations();
+    SaveDriverCache();
 }
 
 // gow3: shader/pipeline compile time on the GPU thread, reported by GOW3_FRAME_STATS.
@@ -626,6 +754,8 @@ void PipelineCache::FinishCompilations() {
         for (const auto& cache : worker_pipeline_caches) {
             sources.push_back(*cache);
         }
+        std::unique_lock<std::mutex> driver_lock;
+        if (driver_cache) driver_lock = std::unique_lock{driver_cache->mutex};
         const auto result = instance.GetDevice().mergePipelineCaches(*pipeline_cache, sources);
         if (result != vk::Result::eSuccess) {
             LOG_ERROR(Render_Vulkan, "gow3: compiler cache merge failed: {}", vk::to_string(result));
@@ -641,6 +771,8 @@ void PipelineCache::SeedWorkerCaches() {
     if (!compiler || worker_caches_seeded) {
         return;
     }
+    std::unique_lock<std::mutex> driver_lock;
+    if (driver_cache) driver_lock = std::unique_lock{driver_cache->mutex};
     for (const auto& cache : worker_pipeline_caches) {
         const auto result = instance.GetDevice().mergePipelineCaches(*cache, *pipeline_cache);
         ASSERT_MSG(result == vk::Result::eSuccess, "Failed to seed compiler pipeline cache");

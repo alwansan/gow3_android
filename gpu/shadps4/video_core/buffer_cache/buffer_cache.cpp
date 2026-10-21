@@ -349,6 +349,36 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     return {arena, arena->Offset(device_addr)};
 }
 
+std::pair<const Buffer*, u64> BufferCache::ObtainBufferRanges(
+    VAddr device_addr, u32 size, std::span<const CopyRange> requested, bool is_written) {
+    const auto normalized = NormalizeCopyRanges(size, requested);
+    if (!normalized || normalized->empty()) {
+        return ObtainBuffer(device_addr, size, is_written);
+    }
+    // 先解决图像回读，避免在持有页跟踪锁时等待 GPU。
+    for (auto [offset, length] : *normalized) {
+        texture_cache.ResolveReadbacks(device_addr + offset, length, true, ReadbackSource::BufferObtain);
+    }
+    const auto* arena = GetArena(device_addr >> block_shift, (device_addr + size - 1) >> block_shift);
+    for (auto [offset, length] : *normalized) {
+        EnsureResident(arena, (device_addr + offset) >> block_shift,
+                       (device_addr + offset + length - 1) >> block_shift);
+    }
+    boost::container::small_vector<vk::BufferCopy, 4> copies;
+    size_t bytes = 0;
+    const Buffer* staging = nullptr;
+    memory_tracker->ForEachUploadRanges(device_addr, *normalized, is_written,
+        [&](u64 address, u64 length) {
+            copies.emplace_back(bytes, address, length);
+            bytes += length;
+        }, [&] { staging = UploadCopies(arena, copies, bytes); });
+    if (staging) runtime.CopyBuffer(staging, arena, copies);
+    if (is_written) {
+        for (auto [offset, length] : *normalized) gpu_modified_ranges.Add(device_addr + offset, length);
+    }
+    return {arena, arena->Offset(device_addr)};
+}
+
 std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_addr, u32 size) {
     texture_cache.ResolveReadbacks(device_addr, size, true, ReadbackSource::BufferForImage);
     if (IsRegionGpuModified(device_addr, size)) {

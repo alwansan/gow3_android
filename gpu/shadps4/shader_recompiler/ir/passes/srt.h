@@ -20,18 +20,22 @@ inline const void* SrtWalkerCode(PFN_SrtWalker walker) {
     return reinterpret_cast<const void*>(walker);
 }
 #else
-/// On non-x86 hosts the walker is portable SRT bytecode, not executable machine code.
+// 缓存仍使用可移植字节码；ARM64 加载时另行生成机器码。
 void RunSrtProgram(const u32* program, const u32* user_data, u32* flat_dst);
+struct SrtProgram;
+const void* SrtProgramCode(const SrtProgram* program);
+void RunSrtWalker(SrtProgram* program, const u32* user_data, u32* flat_dst);
 struct SrtWalker {
-    const u32* program{};
+    SrtProgram* program{};
     void operator()(const u32* user_data, u32* flat_dst) const {
-        RunSrtProgram(program, user_data, flat_dst);
+        RunSrtWalker(program, user_data, flat_dst);
     }
     explicit operator bool() const { return program != nullptr; }
 };
 using PFN_SrtWalker = SrtWalker;
+static_assert(sizeof(PFN_SrtWalker) == sizeof(void*), "Preserve the shader cache layout");
 inline const void* SrtWalkerCode(PFN_SrtWalker walker) {
-    return walker.program;
+    return SrtProgramCode(walker.program);
 }
 #endif
 PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size);

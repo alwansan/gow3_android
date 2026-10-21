@@ -13,6 +13,15 @@
 #else
 #include <atomic>
 #include <vector>
+#include <memory>
+#include <mutex>
+#include <cstdlib>
+#include <cstdio>
+#ifdef ARCH_ARM64
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+#include "shader_recompiler/ir/passes/srt_arm64.h"
 #include "../../../../../src/runtime.h"
 #endif
 #include "common/decoder.h"
@@ -135,37 +144,88 @@ static bool SrtWalkerSignalHandler(void* context, void* fault_address) {
 #else
 
 namespace {
-// Portable SRT bytecode used on ARM64.  The x86-64 path below emits equivalent machine code.
-enum SrtOp : u32 {
-    OpEnd,
-    OpPushImm,
-    OpPushDyn,
-    OpPop,
-    OpCopyImm,
-    OpCopyDyn,
-    OpUserData,
-    OpFlat,
-    OpImm,
-    OpAdd,
-    OpSub,
-    OpMul,
-    OpShl,
-    OpShr,
-    OpAnd,
-    OpOr,
-    OpXor,
-    OpNot,
-    OpUMin,
-    OpUMax,
-    OpBitFieldUExtract,
-};
-constexpr u32 OpZeroed = 0x80000000u;
-constexpr u32 SrtMagic = 0x42545253u; // "SRTB"
-constexpr u32 MaxDepth = 64;
-constexpr u32 MaxValues = 32;
+using namespace Shader::Arm64Srt;
 } // namespace
 
 namespace Shader {
+
+// 改编自 Daedalus 239b7df；机器码不写入 shader 缓存。
+struct NativeSrtCode {
+    using Function = void (*)(const u32*, u32*);
+    Function function{};
+    std::atomic<bool> enabled{true};
+    void* mapping = nullptr;
+    size_t size{};
+    ~NativeSrtCode() {
+#ifdef ARCH_ARM64
+        if (mapping) munmap(mapping, size);
+#endif
+    }
+};
+
+static NativeSrtCode* CompileNativeSrt(std::span<const u32> program) {
+#ifdef ARCH_ARM64
+    static const bool enabled = [] {
+        const char* value = std::getenv("GOW3_SRT_NATIVE");
+        return !value || value[0] != '0';
+    }();
+    if (!enabled) return nullptr;
+    const auto code = Arm64Srt::Compile(program);
+    if (code.empty()) return nullptr;
+    const long page = sysconf(_SC_PAGESIZE);
+    if (page <= 0) return nullptr;
+    auto native = std::make_unique<NativeSrtCode>();
+    native->size = (code.size() * sizeof(u32) + size_t(page) - 1) & ~(size_t(page) - 1);
+    native->mapping = mmap(nullptr, native->size, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (native->mapping == MAP_FAILED) { native->mapping = nullptr; return nullptr; }
+    std::memcpy(native->mapping, code.data(), code.size() * sizeof(u32));
+    auto* begin = static_cast<char*>(native->mapping);
+    __builtin___clear_cache(begin, begin + native->size);
+    if (mprotect(native->mapping, native->size, PROT_READ | PROT_EXEC)) return nullptr;
+    native->function = reinterpret_cast<NativeSrtCode::Function>(native->mapping);
+    static std::once_flag log_once;
+    std::call_once(log_once, [] { std::printf("GPU SRT: native ARM64 walker enabled\n"); });
+    static std::mutex mutex;
+    static std::vector<std::unique_ptr<NativeSrtCode>> mappings;
+    std::scoped_lock lock{mutex};
+    auto* result = native.get();
+    mappings.push_back(std::move(native));
+    return result;
+#else
+    (void)program;
+    return nullptr;
+#endif
+}
+
+struct SrtProgram {
+    std::vector<u32> words;
+    NativeSrtCode* native{};
+};
+
+const void* SrtProgramCode(const SrtProgram* program) {
+    return program ? program->words.data() : nullptr;
+}
+
+void RunSrtWalker(SrtProgram* stored, const u32* user_data, u32* flat) {
+    const auto* program = stored->words.data();
+    auto* native = stored->native;
+    if (native && native->enabled.load(std::memory_order_relaxed)) {
+        // 沿用运行时故障边界；出错后由解释器重试，仅将故障操作置零。
+        sigjmp_buf* const previous = runtime_fault_recover;
+        sigjmp_buf recover;
+        if (sigsetjmp(recover, 0) == 0) {
+            runtime_fault_recover = &recover;
+            native->function(user_data, flat);
+            runtime_fault_recover = previous;
+            return;
+        }
+        runtime_fault_recover = previous;
+        native->enabled.store(false, std::memory_order_relaxed);
+        LOG_WARNING(Render_Recompiler, "Native SRT faulted; using portable interpreter");
+    }
+    RunSrtProgram(program, user_data, flat);
+}
 
 PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
     u32 magic = 0;
@@ -174,9 +234,16 @@ PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
         LOG_ERROR(Render_Recompiler, "SRT walker in shader cache is not an SRT program");
         return {};
     }
-    auto* program = new u32[size / sizeof(u32)];
-    std::memcpy(program, ptr, size);
-    return SrtWalker{program};
+    auto program = std::make_unique<SrtProgram>();
+    program->words.resize(size / sizeof(u32));
+    std::memcpy(program->words.data(), ptr, size);
+    program->native = CompileNativeSrt(program->words);
+    static std::mutex mutex;
+    static std::vector<std::unique_ptr<SrtProgram>> programs;
+    std::scoped_lock lock{mutex};
+    auto* result = program.get();
+    programs.push_back(std::move(program));
+    return SrtWalker{result};
 }
 
 void RunSrtProgram(const u32* program, const u32* user_data, u32* flat) {

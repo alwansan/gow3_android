@@ -95,8 +95,15 @@ class LaunchParamsTest {
         assertEquals("60", LaunchParams.valueOf(empty, byKey.getValue("fps_limit")))
         assertEquals("60", LaunchParams.valueOf(empty, byKey.getValue("engine_fps")))
         assertEquals("1", LaunchParams.valueOf(empty, byKey.getValue("vsync")))
-        assertEquals("1", LaunchParams.valueOf(empty, byKey.getValue("frames_queued")))
+        assertEquals("2", LaunchParams.valueOf(empty, byKey.getValue("frames_queued")))
         assertEquals("100", LaunchParams.valueOf(empty, byKey.getValue("vibration")))
+    }
+
+    @Test fun `explicit frame queue preferences survive the mobile default`() {
+        val param = LaunchParams.all.first { it.key == "frames_queued" }
+        for (value in listOf("0", "1", "2")) {
+            assertEquals(value, LaunchParams.valueOf(mapOf("frames_queued" to value), param))
+        }
     }
 
     @Test fun `sharpness offers the discrete clamp-domain tiers`() {

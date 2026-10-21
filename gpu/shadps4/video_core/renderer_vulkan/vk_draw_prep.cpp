@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "gow3_threads.h"
+#include "gow3_mobile_policy.h"
 #include "gow3_toggles.h"
 #include "common/thread.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -53,7 +54,8 @@ u32 DefaultWorkerCount() {
     }
     // Workers are SCHED_IDLE and claim whole buffers, so more of them only use more idle
     // cores: half the hardware threads (Steam Deck 4, 16-thread desktop 8).
-    return std::clamp<u32>(Gow3Threads::Available() / 2, 1, 8);
+    return Gow3Mobile::PreparationWorkers(
+        Gow3Mobile::Android(), std::clamp<u32>(Gow3Threads::Available() / 2, 1, 8));
 }
 
 /// Flattened user data of one submission: chunks never move, so the GPU thread can read a
@@ -205,8 +207,8 @@ DrawPreparation::DrawPreparation(PipelineCache& pipeline_cache_)
     for (u32 i = 0; i < worker_count; ++i) {
         workers.emplace_back([this, i](std::stop_token stop) { WorkerLoop(stop, i); });
     }
-    std::printf("GPU: draw preparation workers: %u (+1 scanner, %u hardware threads)\n",
-                worker_count, Gow3Threads::Available());
+    std::printf("GPU: draw preparation workers: %u (+%u scanner, %u hardware threads)\n",
+                worker_count, worker_count ? 1u : 0u, Gow3Threads::Available());
 }
 
 DrawPreparation::~DrawPreparation() {

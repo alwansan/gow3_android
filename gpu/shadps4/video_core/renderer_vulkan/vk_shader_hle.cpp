@@ -176,6 +176,13 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
         const char* env = std::getenv("GOW3_COPY_MERGE_KB");
         return env ? vk::DeviceSize(std::strtoull(env, nullptr, 10)) * 1024 : vk::DeviceSize(64_KB);
     }();
+    static thread_local std::vector<VideoCore::CopyRange> source_ranges, destination_ranges;
+    source_ranges.reserve(copies.size());
+    destination_ranges.reserve(copies.size());
+    static const bool exact_ranges = [] {
+        const char* value = std::getenv("GOW3_COPY_EXACT_RANGES");
+        return !value || std::string_view(value) != "0";
+    }();
     u32 batch_start = 0;
     u32 batch_end = 0;
 
@@ -209,11 +216,23 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
             dst_offset_max = new_dst_offset_max;
         }
 
-        // Obtain buffers for the total source and destination ranges.
-        const auto [src_buf, src_buf_offset] = buffer_cache.ObtainBuffer(
-            src_buf_sharp.base_address + src_offset_min, src_offset_max - src_offset_min, false);
-        const auto [dst_buf, dst_buf_offset] = buffer_cache.ObtainBuffer(
-            dst_buf_sharp.base_address + dst_offset_min, dst_offset_max - dst_offset_min, true);
+        // 保留 64 KiB 分组与 MultiCopy，只上传/标记实际拷贝的区间，跳过区间之间的空洞。
+        source_ranges.clear();
+        destination_ranges.clear();
+        for (const auto& region : std::span{copies}.subspan(batch_start, batch_end - batch_start)) {
+            source_ranges.emplace_back(u32(region.srcOffset - src_offset_min), u32(region.size));
+            destination_ranges.emplace_back(u32(region.dstOffset - dst_offset_min), u32(region.size));
+        }
+        const auto obtain = [&](VAddr address, u32 size, const auto& ranges, bool written) {
+            return exact_ranges ? buffer_cache.ObtainBufferRanges(address, size, ranges, written)
+                                : buffer_cache.ObtainBuffer(address, size, written);
+        };
+        const auto [src_buf, src_buf_offset] = obtain(
+            src_buf_sharp.base_address + src_offset_min, u32(src_offset_max - src_offset_min),
+            source_ranges, false);
+        const auto [dst_buf, dst_buf_offset] = obtain(
+            dst_buf_sharp.base_address + dst_offset_min, u32(dst_offset_max - dst_offset_min),
+            destination_ranges, true);
 
         // Apply found buffer base.
         const auto vk_copies = std::span{copies}.subspan(batch_start, batch_end - batch_start);

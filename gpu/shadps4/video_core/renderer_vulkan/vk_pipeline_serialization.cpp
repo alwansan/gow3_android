@@ -21,6 +21,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "common/thread.h"
 #include "gow3_overlay.h"
+#include "gow3_mobile_policy.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
@@ -505,7 +506,9 @@ struct PipelineCache::WarmupPool {
             return 0;
         }
         const u32 cores = std::max(1u, std::thread::hardware_concurrency());
-        return std::clamp(cores > 2 ? cores - 2 : 1u, 1u, 6u);
+        return Gow3Mobile::WorkerOverride("GOW3_GPU_WARMUP_WORKERS",
+            Gow3Mobile::CompilerWorkers(Gow3Mobile::Android(),
+                std::clamp(cores > 2 ? cores - 2 : 1u, 1u, 6u)));
     }
 
     std::atomic<u32> built{0};
@@ -1065,7 +1068,9 @@ bool PipelineCache::StartBackgroundWarmUp() {
     background = new BackgroundWarmup;
     auto& warm = *background;
     warm.started = std::chrono::steady_clock::now();
-    warm.threads = WarmupThreadCount(std::max(1u, std::thread::hardware_concurrency()));
+    warm.threads = Gow3Mobile::WorkerOverride("GOW3_GPU_WARMUP_WORKERS",
+        Gow3Mobile::CompilerWorkers(Gow3Mobile::Android(),
+            WarmupThreadCount(std::max(1u, std::thread::hardware_concurrency()))));
     warm.pool = std::make_unique<WarmupPool>(warm.threads, true);
     // The first job reads the whole store; with one thread the builds queue behind it.
     warm.pool->Push([this, &warm] {
@@ -1350,8 +1355,10 @@ void PipelineCache::StopWarmUp() {
 }
 
 void PipelineCache::Sync() {
+    StopDriverCache();
     StopWarmUp();
     FinishCompilations();
+    SaveDriverCache();
     Storage::DataBase::Instance().Close();
 }
 

@@ -25,6 +25,7 @@
 #include "video_core/renderer_vulkan/vk_recording_observer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "gow3_threads.h"
+#include "gow3_mobile_policy.h"
 
 namespace Vulkan {
 
@@ -476,6 +477,13 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     std::scoped_lock lk{submit_mutex};
     const auto producer = ObserveProducer("SubmitExecution");
     const u64 signal_value = work_semaphore.NextTick();
+    static const bool bounded_submit =
+        Gow3Mobile::Android() && !Gow3Mobile::Enabled("GOW3_VK_POLL_EACH_SUBMIT", false);
+    if (bounded_submit) {
+        if (const u64 tick = Gow3Mobile::BoundedTick(signal_value)) {
+            work_semaphore.Wait(tick);
+        }
+    }
 
 #if TRACY_GPU_ENABLED
     auto* profiler_ctx = instance.GetProfilerContext();
@@ -542,7 +550,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     }
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
 
-    work_semaphore.Refresh();
+    if (!bounded_submit) work_semaphore.Refresh();
     AllocateWorkerCommandBuffers();
 
     // Apply pending operations

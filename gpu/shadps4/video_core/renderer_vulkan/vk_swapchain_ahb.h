@@ -93,7 +93,7 @@ public:
     /// {src, dst} of the barrier that takes the image back from the app / gives it to the app.
     std::pair<u32, u32> AcquireQueues() const;
     std::pair<u32, u32> ReleaseQueues() const;
-    /// 未验证驱动保留 GPU 完成等待；显式异步只要求 signal 及依赖已提交。
+    /// 保守驱动等待 GPU 完成；异步路径只要求 signal 及依赖已提交。
     bool NeedsSubmittedBeforePresent() const { return !async_present; }
 
     /// gow3: 桌面 swapchain 由 in-game 菜单的 vsync 设置驱动重建；Bionic 下节拍在 app 侧
@@ -142,7 +142,7 @@ private:
     bool zero_extent = false;
     bool needs_recreation = true;
     bool sync_import_ok = true; ///< importing sync files as semaphores works (else poll them)
-    bool async_present = Framegen::UseAsync(Framegen::SyncModeFromEnv("GOW3_AHB_SYNC"));
+    bool async_present = false;
 };
 
 } // namespace Vulkan

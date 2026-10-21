@@ -202,7 +202,7 @@ internal object LaunchParams {
                 LaunchOption("2", R.string.param_option_frames_2),
                 LaunchOption("0", R.string.param_option_unlimited),
             ),
-            defaultValue = "1",
+            defaultValue = "2",
             descriptionRes = R.string.param_desc_frames_queued,
         ),
         // show_fps（引擎自带 FPS 叠加层）已退役：帧率显示统一由 launcher 侧性能 HUD

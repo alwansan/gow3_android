@@ -21,6 +21,7 @@
 #include "video_core/texture_cache/aliasing.h"
 #include "video_core/texture_cache/host_compatibility.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include "gow3_mobile_policy.h"
 #include <vulkan/vulkan_format_traits.hpp>
 #include "video_core/texture_cache/tile_manager.h"
 
@@ -181,6 +182,20 @@ void TextureCache::ProcessDownloadImages() {
         ReportPartialViews();
     }
     if (deferred_readbacks) {
+        static const bool empty_fast_path = Gow3Mobile::Enabled("GOW3_READBACK_EMPTY_FAST");
+        bool has_downloads;
+        {
+            std::scoped_lock lock{download_images_mutex};
+            has_downloads = !download_images.empty();
+        }
+        // 下载锁先释放，再取得回读锁；空队列不应排空所有 CPU 上传任务。
+        if (!Gow3Mobile::WaitHostCopies(has_downloads, empty_fast_path)) {
+            if (has_pending_readbacks.load(std::memory_order_acquire)) {
+                std::scoped_lock lock{readback_mutex};
+                RetireReadbacks();
+            }
+            return;
+        }
         // Upload workers must finish reading RAM before these pages become inaccessible.
         scheduler.WaitHostCopies();
         std::scoped_lock readback_lock{readback_mutex};

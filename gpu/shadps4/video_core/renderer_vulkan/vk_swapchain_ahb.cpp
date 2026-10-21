@@ -51,8 +51,12 @@ Swapchain::Swapchain(const Instance& instance_, const Frontend::WindowSDL& windo
                      u32 lsfg_multiplier)
     : instance{instance_}, window{window_} {
     image_count = BufferCount(lsfg_multiplier);
+    const auto sync_mode = Framegen::SyncModeFromEnv("GOW3_AHB_SYNC");
+    // Turnip 交给 sync-fd 传递完成依赖；complete 可回退逐帧 CPU 等待。
+    async_present = Framegen::UseAsync(sync_mode, instance.GetDriverID() == vk::DriverId::eMesaTurnip);
     LOG_INFO(Render_Vulkan, "AHB sync: {} ({})", async_present ? "async" : "complete",
-             async_present ? "explicit diagnostic override" : "unverified driver: conservative");
+             sync_mode != Framegen::SyncMode::Auto ? "explicit override" :
+                 async_present ? "Turnip sync-fd policy" : "conservative driver policy");
     const vk::PhysicalDeviceExternalSemaphoreInfo semaphore_info{
         .handleType = vk::ExternalSemaphoreHandleTypeFlagBits::eSyncFd,
     };

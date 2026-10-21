@@ -196,7 +196,10 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
         free_queue.push(&frame);
     }
 
+#ifndef __ANDROID__
     fsr_pass.Create(device, instance.GetAllocator(), num_images);
+    fsr_created = true;
+#endif
     pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
     Gow3Overlay::Init(instance, swapchain.GetSurfaceFormat().format, num_images);
 
@@ -558,12 +561,20 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     Gow3Settings::Get().image_height = int(image_size.height);
     Gow3Settings::Get().window_width = int(frame->width);
     Gow3Settings::Get().window_height = int(frame->height);
-    Gow3Settings::Get().rcas_applied =
-        fsr_settings.use_rcas &&
-        Gow3Graphics::FsrPassRuns(fsr_settings.enable, true, int(image_size.width), int(image_size.height),
-                                  int(frame->width), int(frame->height));
-    image_view = fsr_pass.Render(cmdbuf, image_view, image_size, {frame->width, frame->height},
-                                 fsr_settings, frame->is_hdr);
+    const bool fsr_runs = Gow3Graphics::FsrPassRuns(
+        fsr_settings.enable, fsr_settings.use_rcas, int(image_size.width), int(image_size.height),
+        int(frame->width), int(frame->height));
+    Gow3Settings::Get().rcas_applied = fsr_settings.use_rcas && fsr_runs;
+    DebugState.is_using_fsr = fsr_runs;
+    if (fsr_runs) {
+        // Android 直通默认不创建无用的 EASU/RCAS 管线；启用时仍支持动态初始化。
+        if (!fsr_created) {
+            fsr_pass.Create(instance.GetDevice(), instance.GetAllocator(), swapchain.GetImageCount());
+            fsr_created = true;
+        }
+        image_view = fsr_pass.Render(cmdbuf, image_view, image_size, {frame->width, frame->height},
+                                     fsr_settings, frame->is_hdr);
+    }
 
     // Vulkan has no sRGB variant of the 10-bit format, so an A2R10G10B10Srgb buffer reaches
     // the post process pass still sRGB encoded and has to be decoded there instead.
