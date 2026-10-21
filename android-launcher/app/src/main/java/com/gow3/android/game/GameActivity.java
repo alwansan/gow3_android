@@ -31,10 +31,13 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.ConcurrentHashMap;
 import com.gow3.android.core.settings.FrameGenSettings;
 import com.gow3.android.core.settings.GamePrefs;
 import com.gow3.android.core.settings.Gow3Settings;
 import com.gow3.android.Gow3App;
+import com.gow3.android.data.GameUpdateView;
+import com.gow3.android.data.Gow3Prepare;
 import com.gow3.android.game.drawer.GameDrawer;
 import com.gow3.android.game.drawer.GameDrawerCallbacks;
 
@@ -65,6 +68,7 @@ public final class GameActivity extends Activity
     private PadBridge pad;
     private AudioBridge audio;
     private volatile Process game;
+    private final Map<Process,GameUpdateView> gameViews=new ConcurrentHashMap<>();
     private volatile int shmid=-1;
     private volatile boolean destroyed;
     /** 报告 LSFG 运行时失败并自动回退后置位：刷新率要退回「无 LSFG」的目标，避免
@@ -455,7 +459,7 @@ public final class GameActivity extends Activity
         }
     }
 
-    private Process process(String... args) throws java.io.IOException {
+    private Process process(GameUpdateView view, String... args) throws java.io.IOException {
         ProcessBuilder b=new ProcessBuilder(args).redirectErrorStream(true);
         Map<String,String> env=b.environment(); env.clear();
         // Bionic: no rootfs, so the environment is the platform's - toybox paths, the Bionic
@@ -472,6 +476,7 @@ public final class GameActivity extends Activity
             env.put("GOW3_LOG_DIR",DATA+"/logs");
         if (gameDir!=null) env.put("GOW3_GAME_DIR",gameDir);
         if (updateDir!=null) env.put("GOW3_PATCH_DIR",updateDir);
+        env.put("GOW3_APP0_DIR",view.getDirectory().getAbsolutePath());
         return b.start();
     }
     private void startX(SurfaceHolder holder) {
@@ -717,37 +722,36 @@ public final class GameActivity extends Activity
      * The Bionic runtime needs the game's derived inputs before it starts: the patch blob, the
      * AppContent profile and launch.env. The glibc build produced these with the Python scripts in
      * a rootfs or on a host; here libgow3prepare compiles them from the installed game. Returns
-     * false and reports when the game cannot be prepared, so a stale run never starts.
+     * null 并报错表示准备失败，避免启动旧的派生产物；成功结果持有本轮有效游戏视图。
      */
-    private boolean prepareBionicGame() {
+    private Gow3Prepare.Result prepareBionicGame() {
         try {
             File game=new File(gameDir);
             File update=updateDir!=null && !updateDir.isEmpty() ? new File(updateDir) : null;
             com.gow3.android.data.PatchCatalog catalog=
                     com.gow3.android.data.PatchCatalog.Companion.load(game, update, getAssets());
             java.util.Map<String,String> ini=Gow3Settings.read(configIni());
-            com.gow3.android.data.Gow3Prepare.Result result=
-                    com.gow3.android.data.Gow3Prepare.INSTANCE.prepare(this,game,update,catalog,ini);
+            Gow3Prepare.Result result=Gow3Prepare.prepare(this,game,update,catalog,ini);
             android.util.Log.i("God of War III",
                     "bionic prepare: "+result.getReason()+"; applied="+result.getApplied()
                             +"; writes="+result.getWriteCount()+"; dmem="+result.getDmemMb()
                             +"; vblank="+result.getVblankHz());
             if (!result.getOk()) {
                 error("Game preparation failed ("+result.getReason()+"): "+result.getMessage());
-                return false;
+                return null;
             }
-            return true;
+            return result;
         } catch (com.gow3.android.data.PatchCatalogException ex) {
             error("This game's patch set is not available: "+ex.getProblem());
-            return false;
+            return null;
         } catch (java.io.IOException ex) {
             android.util.Log.e("God of War III","bionic prepare: cannot read the patch catalogue",ex);
             error("Game preparation failed: "+ex);
-            return false;
+            return null;
         } catch (Exception ex) {
             android.util.Log.e("God of War III","bionic prepare failed",ex);
             error("Game preparation failed: "+ex);
-            return false;
+            return null;
         }
     }
     private void startGame() {
@@ -767,7 +771,14 @@ public final class GameActivity extends Activity
         // 帧生成遥测（framegen.stats）是会话态文件：启动兜底删除，防止上一会话残留被
         // 性能 HUD 当成实时插帧遥测（显示「LSFG Nx」）；游戏侧 presenter 也会在引擎不活跃时清除。
         new File(DATA,"framegen.stats").delete();
-        if (!prepareBionicGame()) return;
+        Gow3Prepare.Result prepared=prepareBionicGame();
+        if (prepared==null) return;
+        final GameUpdateView view=prepared.getGameView();
+        if (view==null) {
+            error("Game preparation did not return its effective game view.");
+            return;
+        }
+        if (destroyed) { closeView(view); return; }
         // 上一轮日志保留一代：写新的 android-game.log 前把旧的轮转为 android-game.prev.log，
         // 使崩溃日志在重启后不丢，并随日志导出一起打包。轮转失败时忽略，照常写新日志。
         File logDir=new File(DATA,"logs");
@@ -777,10 +788,20 @@ public final class GameActivity extends Activity
             if (!gameLog.renameTo(previous))
                 android.util.Log.w("God of War III","log rotation: could not rename android-game.log to android-game.prev.log");
         }
+        Process child=null;
         try {
             // /system/bin/sh pulls run-bionic.sh directly (toybox): no rootfs loader, no X11.
-            final Process launched=process("/system/bin/sh",BASE+"/run-bionic.sh","game");
+            final Process launched=process(view,"/system/bin/sh",BASE+"/run-bionic.sh","game");
+            child=launched;
+            gameViews.put(launched,view);
             game=launched;
+            if (destroyed) {
+                launched.destroyForcibly();
+                try { launched.waitFor(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                if (game==launched) game=null;
+                closeGameView(launched);
+                return;
+            }
             Thread log=new Thread(() -> {
                 try (BufferedReader r=new BufferedReader(new InputStreamReader(launched.getInputStream()));
                      PrintWriter out=new PrintWriter(new File(DATA,"logs/android-game.log"))) {
@@ -799,9 +820,21 @@ public final class GameActivity extends Activity
                     // A restart (settings, cheats) kills this process on purpose: its reader is
                     // interrupted then, after the next game started. Only the current game's errors show.
                     if (!destroyed && game==launched) error(ex.toString());
+                } finally {
+                    closeGameView(launched);
                 }
             },"God of War III-log"); log.setDaemon(true); log.start();
-        } catch (Exception ex) { error(ex.toString()); }
+        } catch (Exception ex) {
+            if (child!=null) {
+                child.destroyForcibly();
+                try { child.waitFor(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                if (game==child) game=null;
+                closeGameView(child);
+            } else {
+                closeView(view);
+            }
+            error(ex.toString());
+        }
     }
     private void error(String message) {
         hadError=true;
@@ -813,9 +846,20 @@ public final class GameActivity extends Activity
         if (p!=null) {
             p.destroyForcibly();
             try { p.waitFor(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            closeGameView(p);
         }
         shmid=-1; // 同上：游戏进程没了，surface 重建只能走完整的用户启动流程
         Gow3Present.stop();
+    }
+    private static void closeView(GameUpdateView view) {
+        try { view.close(); }
+        catch (Exception ex) { android.util.Log.w("God of War III","Cannot remove game update view",ex); }
+    }
+    private void closeGameView(Process process) {
+        // 旧日志线程只能归还自己的视图，且必须等 child 确认退出。
+        if (process==null || process.isAlive()) return;
+        GameUpdateView view=gameViews.remove(process);
+        if (view!=null) closeView(view);
     }
     @Override protected void onDestroy() {
         destroyed=true; pad.reset(); audio.stop(); main.removeCallbacksAndMessages(null);
@@ -836,6 +880,8 @@ public final class GameActivity extends Activity
                 }
             } catch (RuntimeException ignored) {
                 // Teardown is best effort: the activity is already going away.
+            } finally {
+                closeGameView(p);
             }
         },"gow3-teardown").start();
         super.onDestroy();
