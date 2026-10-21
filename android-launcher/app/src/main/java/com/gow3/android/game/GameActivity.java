@@ -38,6 +38,7 @@ import com.gow3.android.core.settings.Gow3Settings;
 import com.gow3.android.Gow3App;
 import com.gow3.android.data.GameUpdateView;
 import com.gow3.android.data.Gow3Prepare;
+import com.gow3.android.data.ModGameView;
 import com.gow3.android.game.drawer.GameDrawer;
 import com.gow3.android.game.drawer.GameDrawerCallbacks;
 
@@ -69,6 +70,7 @@ public final class GameActivity extends Activity
     private AudioBridge audio;
     private volatile Process game;
     private final Map<Process,GameUpdateView> gameViews=new ConcurrentHashMap<>();
+    private final Map<Process,ModGameView> modViews=new ConcurrentHashMap<>();
     private volatile int shmid=-1;
     private volatile boolean destroyed;
     /** 报告 LSFG 运行时失败并自动回退后置位：刷新率要退回「无 LSFG」的目标，避免
@@ -267,10 +269,6 @@ public final class GameActivity extends Activity
     }
 
     // ---- GameDrawerCallbacks：抽屉面板经此接口触发动作与读取当前值 ----
-
-    @Override public void resumeGame() { closeDrawer(); }
-
-    @Override public void requestRestart() { restartGame(); }
 
     @Override public void quitGame() { finish(); }
 
@@ -491,7 +489,7 @@ public final class GameActivity extends Activity
         }
     }
 
-    private Process process(GameUpdateView view, String... args) throws java.io.IOException {
+    private Process process(File app0, String... args) throws java.io.IOException {
         ProcessBuilder b=new ProcessBuilder(args).redirectErrorStream(true);
         Map<String,String> env=b.environment(); env.clear();
         // Bionic: no rootfs, so the environment is the platform's - toybox paths, the Bionic
@@ -508,7 +506,9 @@ public final class GameActivity extends Activity
             env.put("GOW3_LOG_DIR",DATA+"/logs");
         if (gameDir!=null) env.put("GOW3_GAME_DIR",gameDir);
         if (updateDir!=null) env.put("GOW3_PATCH_DIR",updateDir);
-        env.put("GOW3_APP0_DIR",view.getDirectory().getAbsolutePath());
+        // 最终有效视图（基础 + 更新 + 启用模组）由 libgow3prepare 编译补丁时同一份，
+        // 运行时从这里启动；玩家游戏、更新与模组文件只读。
+        env.put("GOW3_APP0_DIR",app0.getAbsolutePath());
         return b.start();
     }
     private void startX(SurfaceHolder holder) {
@@ -818,7 +818,9 @@ public final class GameActivity extends Activity
             error("Game preparation did not return its effective game view.");
             return;
         }
-        if (destroyed) { closeView(view); return; }
+        final ModGameView modView=prepared.getModView();
+        final File app0=modView!=null ? modView.getDirectory() : view.getDirectory();
+        if (destroyed) { closeView(view); if (modView!=null) closeModView(modView); return; }
         // 上一轮日志保留一代：写新的 android-game.log 前把旧的轮转为 android-game.prev.log，
         // 使崩溃日志在重启后不丢，并随日志导出一起打包。轮转失败时忽略，照常写新日志。
         File logDir=new File(DATA,"logs");
@@ -831,9 +833,10 @@ public final class GameActivity extends Activity
         Process child=null;
         try {
             // /system/bin/sh pulls run-bionic.sh directly (toybox): no rootfs loader, no X11.
-            final Process launched=process(view,"/system/bin/sh",BASE+"/run-bionic.sh","game");
+            final Process launched=process(app0,"/system/bin/sh",BASE+"/run-bionic.sh","game");
             child=launched;
             gameViews.put(launched,view);
+            if (modView!=null) modViews.put(launched,modView);
             game=launched;
             if (destroyed) {
                 launched.destroyForcibly();
@@ -872,6 +875,7 @@ public final class GameActivity extends Activity
                 closeGameView(child);
             } else {
                 closeView(view);
+                if (modView!=null) closeModView(modView);
             }
             error(ex.toString());
         }
@@ -895,9 +899,16 @@ public final class GameActivity extends Activity
         try { view.close(); }
         catch (Exception ex) { android.util.Log.w("God of War III","Cannot remove game update view",ex); }
     }
+    private static void closeModView(ModGameView view) {
+        try { view.close(); }
+        catch (Exception ex) { android.util.Log.w("God of War III","Cannot remove mod view",ex); }
+    }
     private void closeGameView(Process process) {
         // 旧日志线程只能归还自己的视图，且必须等 child 确认退出。
         if (process==null || process.isAlive()) return;
+        // 模组视图先关：它链接进 game-update 视图，必须先删链接层再删被链接层。
+        ModGameView modView=modViews.remove(process);
+        if (modView!=null) closeModView(modView);
         GameUpdateView view=gameViews.remove(process);
         if (view!=null) closeView(view);
     }

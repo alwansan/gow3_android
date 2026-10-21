@@ -321,9 +321,31 @@
 
     <!-- Mods 页 -->
     <string name="mods_title">MOD 与补丁</string>
-    <string name="mods_description">按当前游戏选择补丁，修改会在下次启动游戏时生效。</string>
+    <string name="mods_description">当前游戏的补丁与文件模组，修改会在下次启动游戏时生效。</string>
     <string name="mods_empty_title">未安装任何 MOD</string>
     <string name="mods_empty_description">你的 MOD 与补丁列表将显示在这里。</string>
+    <string name="mods_load_title">加载模组</string>
+    <string name="mods_load_hint">关闭时不加载任何模组文件与模组补丁，下次启动生效。</string>
+    <string name="mods_files_title">文件模组</string>
+    <string name="mods_files_count">启用 %1$d / 共 %2$d</string>
+    <string name="mods_refresh">刷新</string>
+    <string name="mods_files_empty">未发现模组。把模组文件夹（或 .zip）放入 mods 目录后点刷新。模组整文件替换游戏文件，游戏目录永不被修改。</string>
+    <string name="mods_conflicts">⚠ %1$d 个文件被多个模组修改，列表中靠下的模组胜出。</string>
+    <string name="mods_conflict_warning">与其它模组冲突，靠下的模组胜出</string>
+    <string name="mods_presets_title">预设</string>
+    <string name="mods_presets_hint">保存加载顺序与禁用的模组</string>
+    <string name="mods_presets_empty">还没有保存预设。</string>
+    <string name="mods_presets_load">加载</string>
+    <string name="mods_presets_delete">删除</string>
+    <string name="mods_presets_save">保存</string>
+    <string name="mods_folder">文件夹：%1$s</string>
+    <string name="mods_open_folder">打开文件夹</string>
+    <string name="mods_tab_mods">模组</string>
+    <string name="mods_tab_patches">补丁</string>
+    <string name="mods_import_zip">导入 .zip</string>
+    <string name="mods_import_folder">导入文件夹</string>
+    <string name="mods_imported_fmt">已导入“%1$s”。</string>
+    <string name="mods_import_failed">模组导入失败。</string>
 
     <!-- 数据层消息 -->
     <string name="no_file_picker_fmt">此设备上没有可用的文件选择器（%1$s）。</string>

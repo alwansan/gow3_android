@@ -81,6 +81,7 @@ object Gow3Prepare {
         val writeCount: Int,
         val message: String,
         val gameView: GameUpdateView? = null,
+        val modView: ModGameView? = null,
     )
 
     /**
@@ -105,23 +106,45 @@ object Gow3Prepare {
     ): Result {
         val parent = File(File(context.filesDir, "gow3port"), "data")
         val view = GameUpdateView.create(gameDir, updateDir, parent)
+        var modView: ModGameView? = null
         try {
-            val identity = GameSfo.read(File(view.directory, "sce_sys/param.sfo"))
+            // 启用模组（总开关开启）叠加在「基础 + 更新」视图之上，运行时实际启动的目录是最终视图。
+            modView = ModGameView.create(
+                view,
+                File(Gow3Data.root(context), "mods"),
+                File(Gow3Data.root(context), "mods.json"),
+                ini["load_mods"] != "0",
+                parent,
+            )
+            val effective = modView?.directory ?: view.directory
+            val identity = GameSfo.read(File(effective, "sce_sys/param.sfo"))
             if (identity?.get("TITLE_ID") != catalog.titleId || identity?.get("APP_VER") != catalog.appVersion) {
                 throw java.io.IOException("The effective game identity changed; select the game/update again")
             }
             // 补丁、链接模块、SFO 与运行时 app0 必须来自同一份有效视图。
-            val result = prepareEffective(context, view.directory, catalog, ini)
-            if (result.ok) return result.copy(gameView = view)
+            val result = prepareEffective(context, effective, catalog, ini)
+            if (result.ok) return result.copy(gameView = view, modView = modView)
+            closeQuietly(modView)
             view.close()
             return result
         } catch (error: Exception) {
             try {
+                closeQuietly(modView)
                 view.close()
             } catch (cleanup: java.io.IOException) {
                 error.addSuppressed(cleanup)
             }
             throw error
+        }
+    }
+
+    private fun closeQuietly(modView: ModGameView?) {
+        if (modView != null) {
+            try {
+                modView.close()
+            } catch (ignored: java.io.IOException) {
+                // 清理失败不影响准备结果上报。
+            }
         }
     }
 
