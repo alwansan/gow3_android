@@ -406,6 +406,10 @@ static int cheat_identity(const char *app0) {
     sfo_value(path, "APP_VER", version, sizeof(version), NULL);
     for (unsigned i = 0; i < sizeof(candidates) / sizeof(candidates[0]); ++i)
         if (!strcmp(serial, candidates[i][0]) && !strcmp(version, candidates[i][1])) return 1;
+    /* Not silent: an unsupported identity is the one case where no cheat is installed at all,
+     * so the log has to say which game was seen. */
+    printf("FEX Cheats: OFF - unsupported game identity %s %s (no cheats installed)\n",
+           serial[0] ? serial : "<none>", version[0] ? version : "<none>");
     return 0;
 }
 
@@ -975,6 +979,7 @@ int main(int argc, char **argv) {
      * to trampoline stubs) in install_cheats. The orb/actor/stat multipliers still need their own
      * JIT path; they are not installed here yet. */
     if (gpu_enabled) install_cheats(app0, segments, ns, size);
+    else printf("FEX Cheats: OFF - the GPU library was not initialized (no cheats installed)\n");
 #endif
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
