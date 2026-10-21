@@ -391,14 +391,22 @@ static int gow3_cheat_locate(Gow3CheatSite *sites, unsigned id, const unsigned c
     return found;
 }
 
-/* The cheat gate: enable a cheat only for the reference identity (same set as the fixed-address
- * path below). Serial/version come from param.sfo; unsupported games get no cheats at all. */
+/* The cheat gate: the candidate games are the same serial/version set the patch system supports
+ * (scripts/patches.py::GAMES). Which cheat actually applies is decided by each hook's signature
+ * in this build, not by the identity: a hook whose signature does not match is reported
+ * unavailable, the others still install. */
 static int cheat_identity(const char *app0) {
+    static const char *const candidates[][2] = {
+        {"CUSA01623", "01.02"}, {"CUSA01715", "01.02"}, {"CUSA01720", "01.02"},
+        {"CUSA01740", "01.00"}, {"CUSA01740", "01.02"},
+    };
     char path[4096], serial[32] = "", version[32] = "";
     snprintf(path, sizeof(path), "%s/sce_sys/param.sfo", app0 ? app0 : ".");
     sfo_value(path, "TITLE_ID", serial, sizeof(serial), NULL);
     sfo_value(path, "APP_VER", version, sizeof(version), NULL);
-    return !strcmp(serial, "CUSA01623") && !strcmp(version, "01.02");
+    for (unsigned i = 0; i < sizeof(candidates) / sizeof(candidates[0]); ++i)
+        if (!strcmp(serial, candidates[i][0]) && !strcmp(version, candidates[i][1])) return 1;
+    return 0;
 }
 
 #if defined(GUEST_CPU_NATIVE)
@@ -596,6 +604,11 @@ static void install_cheats(const char *app0, Segment *segments, uint64_t count, 
             continue;
         }
         protect(stubs, page_size, 5);
+        /* The trampoline holds guest code the JIT has to translate, but it lives outside the
+         * game image: the FEX decoder only translates addresses the guest CPU reports as
+         * executable, and an unregistered range decodes to an invalid instruction (SIGILL at
+         * the first use). Register the page as guest code so the JIT translates it. */
+        guest_cpu_code((uintptr_t)stubs, page_size);
         unsigned verified = 0;
         uint64_t first = 0;
         for (unsigned i = 0; i < GOW3_CHEAT_HOOK_COUNT; ++i) {
@@ -612,8 +625,12 @@ static void install_cheats(const char *app0, Segment *segments, uint64_t count, 
         }
         if (!ok) continue;
         gow3_cheat_status(id);
+        /* The flag byte is the menu's switch (Gow3Settings::cheats[id]): report whether it is
+         * already on, so the log says whether the cheat is live in this launch. */
+        const uintptr_t flag = gow3_cheat_flag(id);
+        const int selected = flag ? *(const volatile unsigned char *)flag : 0;
         printf("FEX Cheats: %s READY, %u verified site(s), selected=%d, first=0x%lx\n",
-               gow3_cheat_names[id], verified, 0, (unsigned long)first);
+               gow3_cheat_names[id], verified, selected, (unsigned long)first);
     }
 }
 #endif
