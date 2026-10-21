@@ -1331,7 +1331,8 @@ float TemporalUpscaler::SceneMipBias() const {
 }
 
 bool TemporalUpscaler::Scaled() const {
-    return scaled_session || target_width != 1920 || target_height != 1080;
+    return UiComposition::NeedsComposition(scaled_session, render_width, render_height,
+                                           target_width, target_height);
 }
 
 void TemporalUpscaler::OnColorTarget(VideoCore::ImageId color) {

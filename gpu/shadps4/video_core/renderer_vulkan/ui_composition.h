@@ -9,6 +9,12 @@ namespace Vulkan::UiComposition {
 
 enum class Background { None, Copy, Temporal };
 
+constexpr bool NeedsComposition(bool patched, uint32_t render_width, uint32_t render_height,
+                                uint32_t output_width, uint32_t output_height) {
+    return output_width != 1920 || output_height != 1080 ||
+           (patched && (render_width != 1920 || render_height != 1080));
+}
+
 // UI composition must not require scene depth/camera or an active FSR context.
 constexpr Background Choose(bool scaled, bool ui_draw, bool scene_ready, bool fsr_active) {
     if (!scaled || !ui_draw) {

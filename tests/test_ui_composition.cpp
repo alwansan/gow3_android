@@ -5,6 +5,13 @@
 
 int main() {
     using namespace Vulkan::UiComposition;
+    assert(!NeedsComposition(true, 1920, 1080, 1920, 1080));
+    assert(!NeedsComposition(false, 1920, 1080, 1920, 1080));
+    assert(NeedsComposition(true, 1280, 720, 1280, 720));
+    assert(NeedsComposition(true, 960, 540, 1280, 720));
+    assert(NeedsComposition(true, 1920, 1080, 1280, 720));
+    assert(NeedsComposition(true, 1920, 1080, 2560, 1440));
+    assert(NeedsComposition(false, 1920, 1080, 1280, 720));
     // Title/loading menus have no depth/camera. UI must still go to the native target.
     assert(Choose(true, true, false, true) == Background::Copy);
     assert(Choose(true, true, false, false) == Background::Copy);
