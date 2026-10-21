@@ -21,7 +21,10 @@ inline bool Enabled(const char* name, bool fallback = true) {
 }
 
 constexpr unsigned FramesQueued(bool android) { return android ? 2 : 1; }
-constexpr unsigned PreparationWorkers(bool android, unsigned desktop) { return android ? 0 : desktop; }
+// Android 默认 0（串行准备）在实测中让 GpuComm 线程独占所有资源准备，是 540p 掉帧的
+// 最大 CPU 嫌疑；性能对照实验改用桌面默认（Gow3Threads::Available()/2，本设备 4 个），
+// 保留 GOW3_PREP_WORKERS 覆盖。若出现 guest 内存投机读取 fault 再回退。
+constexpr unsigned PreparationWorkers(bool android, unsigned desktop) { return desktop; }
 constexpr unsigned CompilerWorkers(bool android, unsigned desktop) { return android ? 2 : desktop; }
 constexpr unsigned CaptureWorkers(bool android, unsigned desktop) { return android ? 1 : desktop; }
 inline unsigned WorkerOverride(const char* name, unsigned fallback) {

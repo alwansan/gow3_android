@@ -49,8 +49,11 @@ volatile u32* args = nullptr;
 std::atomic<u32> next_args_slot{0};
 
 void Init(const Instance& instance) {
+    // 默认关闭：breadcrumbs 是 GPU 挂死取证工具（每个 draw/dispatch 前后写 marker 命令 + CPU
+    // 环形登记），是逐帧开销。性能对照实验（Android 540p 掉帧定位）确认默认开启时 GpuComm
+    // 线程被拖慢；现在只有 GOW3_BREADCRUMBS=1 显式开启才启用，需要取证时再开。
     const char* env = std::getenv("GOW3_BREADCRUMBS");
-    if (env && env[0] == '0') {
+    if (!(env && env[0] == '1')) {
         return;
     }
     if (!instance.IsBufferMarkerSupported()) {
