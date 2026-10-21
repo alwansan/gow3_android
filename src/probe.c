@@ -363,57 +363,81 @@ extern uintptr_t gow3_damage_multiplier(int taken);
 extern uintptr_t gow3_orb_pickup_multiplier(unsigned kind);
 extern void gow3_stat_multipliers_status(int damage, int orb_pickup);
 
-/* The hook installers write x86-64 machine-code stubs into the image; they only apply when the
- * guest runs on the host CPU. Under the JIT this needs guest_cpu_hook (not wired yet), so they
- * are compiled out there (their calls below are gated the same way). */
-#if defined(GUEST_CPU_NATIVE)
-static void install_cheats(const char *app0, Segment *segments, uint64_t count, uint64_t size) {
+/* The hook installers write x86-64 machine-code stubs into the image. On x86-64 hosts the guest
+ * runs on the host CPU, so a stub is reached with a 0xe9 jump written over the hook site. Under
+ * the FEX JIT (arm64) the image is translated lazily; hook sites are instead turned into syscall
+ * traps with guest_cpu_hook, whose host hook points rip at the same trampoline stub. Both paths
+ * share the signature lookup below, so a cheat works on any build whose code matches. */
+static const char *const gow3_cheat_names[] = {"health", "magic", "item meter", "Rage of Sparta",
+                                               "red orbs", "Very Hard unlock", "infinite double jumps"};
+
+/* A hook site of a cheat found in this build: verified address. */
+typedef struct { uint64_t at; int valid; } Gow3CheatSite;
+
+/* Find every hook site of a cheat in the image by signature (any build). */
+static int gow3_cheat_locate(Gow3CheatSite *sites, unsigned id, const unsigned char *image,
+                             uint64_t size, Segment *segments, uint64_t count) {
+    int found = 0;
+    for (unsigned i = 0; i < GOW3_CHEAT_HOOK_COUNT; ++i) {
+        const Gow3CheatHook *hook = &gow3_cheat_hooks[i];
+        if (hook->id != id) continue;
+        sites[i].valid = 0;
+        const uint64_t at = gow3_cheat_find(image, size, hook);
+        if (at == UINT64_MAX || !mapped(segments, count, at, hook->length)) continue;
+        sites[i].at = at;
+        sites[i].valid = 1;
+        ++found;
+    }
+    return found;
+}
+
+/* The cheat gate: enable a cheat only for the reference identity (same set as the fixed-address
+ * path below). Serial/version come from param.sfo; unsupported games get no cheats at all. */
+static int cheat_identity(const char *app0) {
     char path[4096], serial[32] = "", version[32] = "";
     snprintf(path, sizeof(path), "%s/sce_sys/param.sfo", app0 ? app0 : ".");
     sfo_value(path, "TITLE_ID", serial, sizeof(serial), NULL);
     sfo_value(path, "APP_VER", version, sizeof(version), NULL);
-    if (strcmp(serial, "CUSA01623") || strcmp(version, "01.02")) return;
-    const char *names[] = {"health", "magic", "item meter", "Rage of Sparta", "red orbs",
-                           "Very Hard unlock", "infinite double jumps"};
+    return !strcmp(serial, "CUSA01623") && !strcmp(version, "01.02");
+}
+
+#if defined(GUEST_CPU_NATIVE)
+static void install_cheats(const char *app0, Segment *segments, uint64_t count, uint64_t size) {
+    if (!cheat_identity(app0)) return;
     for (unsigned id = 0; id < GOW3_CHEAT_COUNT; ++id) {
-        int valid = 1;
-        for (unsigned i = 0; i < GOW3_CHEAT_HOOK_COUNT; ++i) {
-            const Gow3CheatHook *hook = &gow3_cheat_hooks[i];
-            if (hook->id != id) continue;
-            if (hook->offset > size || hook->length > size - hook->offset ||
-                !mapped(segments, count, hook->offset, hook->length) ||
-                !gow3_cheat_signature_match(hook, image + hook->offset, size - hook->offset)) valid = 0;
-        }
-        if (!valid) {
-            printf("Cheats: %s unavailable (code signature mismatch)\n", names[id]);
+        Gow3CheatSite sites[GOW3_CHEAT_HOOK_COUNT];
+        if (gow3_cheat_locate(sites, id, image, size, segments, count) < 1) {
+            printf("Cheats: %s unavailable (code signature mismatch)\n", gow3_cheat_names[id]);
             continue;
         }
         unsigned char *stubs = allocate(page_size);
         int32_t relative[GOW3_CHEAT_HOOK_COUNT] = {0};
+        int valid = 1;
         for (unsigned i = 0; i < GOW3_CHEAT_HOOK_COUNT; ++i) {
             const Gow3CheatHook *hook = &gow3_cheat_hooks[i];
             if (hook->id != id) continue;
+            if (!sites[i].valid) { valid = 0; break; }
             unsigned char *stub = stubs + i * 256;
-            int64_t delta = (int64_t)(uintptr_t)stub - (int64_t)(uintptr_t)(image + hook->offset + 5);
+            int64_t delta = (int64_t)(uintptr_t)stub - (int64_t)(uintptr_t)(image + sites[i].at + 5);
             if (delta < INT32_MIN || delta > INT32_MAX) { valid = 0; break; }
             relative[i] = (int32_t)delta;
             gow3_cheat_build_stub(stub, hook, gow3_cheat_flag(id),
-                                 (uintptr_t)(image + hook->offset + hook->length));
+                                  (uintptr_t)(image + sites[i].at + hook->length));
         }
         if (!valid) {
-            printf("Cheats: %s unavailable (hook outside relative-jump range)\n", names[id]);
+            printf("Cheats: %s unavailable (hook outside relative-jump range)\n", gow3_cheat_names[id]);
             continue;
         }
         protect(stubs, page_size, 5);
         for (unsigned i = 0; i < GOW3_CHEAT_HOOK_COUNT; ++i) {
             const Gow3CheatHook *hook = &gow3_cheat_hooks[i];
             if (hook->id != id) continue;
-            image[hook->offset] = 0xe9;
-            memcpy(image + hook->offset + 1, &relative[i], 4);
-            memset(image + hook->offset + 5, 0x90, hook->length - 5);
+            image[sites[i].at] = 0xe9;
+            memcpy(image + sites[i].at + 1, &relative[i], 4);
+            memset(image + sites[i].at + 5, 0x90, hook->length - 5);
         }
         gow3_cheat_status(id);
-        printf("Cheats: %s ready (live toggle, initially disabled unless saved)\n", names[id]);
+        printf("Cheats: %s ready (live toggle, initially disabled unless saved)\n", gow3_cheat_names[id]);
     }
 }
 
@@ -525,10 +549,78 @@ static void install_stat_multipliers(const char *app0, Segment *segments, uint64
     printf("Multipliers: damage %s, green/blue/gold orbs %s\n", damage ? "ready" : "unavailable",
            pickup ? "ready" : "unavailable");
 }
+
+#else
+/* JIT path: each hook site becomes a syscall trap (guest_cpu_hook); the redirect hook finds the
+ * site in this table and points rip at its trampoline stub. The trampoline is the same
+ * gow3_cheat_build_stub output (flag check + replacement + jump back), so the runtime toggle
+ * through Gow3Settings::cheats[] still applies on each entry to the stub. */
+typedef struct { uintptr_t addr, target; } Gow3Redirect;
+static Gow3Redirect gow3_redirects[64];
+static unsigned gow3_redirect_count;
+static void cheat_redirect(GuestRegs *regs) {
+    for (unsigned i = 0; i < gow3_redirect_count; ++i)
+        if (gow3_redirects[i].addr == regs->rip) {
+            regs->rip = gow3_redirects[i].target;
+            return;
+        }
+    regs->rip += 2;  /* unknown site: step past the syscall */
+}
+static int cheat_redirect_add(uintptr_t addr, uintptr_t target) {
+    if (gow3_redirect_count >= 64) return 0;
+    if (!guest_cpu_hook(addr, 2, cheat_redirect)) return 0;
+    gow3_redirects[gow3_redirect_count].addr = addr;
+    gow3_redirects[gow3_redirect_count].target = target;
+    ++gow3_redirect_count;
+    return 1;
+}
+static void install_cheats(const char *app0, Segment *segments, uint64_t count, uint64_t size) {
+    if (!cheat_identity(app0)) return;
+    for (unsigned id = 0; id < GOW3_CHEAT_COUNT; ++id) {
+        Gow3CheatSite sites[GOW3_CHEAT_HOOK_COUNT];
+        if (gow3_cheat_locate(sites, id, image, size, segments, count) < 1) {
+            printf("FEX Cheats: %s OFF - no guest code patched\n", gow3_cheat_names[id]);
+            continue;
+        }
+        unsigned char *stubs = allocate(page_size);
+        int ok = 1;
+        for (unsigned i = 0; i < GOW3_CHEAT_HOOK_COUNT; ++i) {
+            const Gow3CheatHook *hook = &gow3_cheat_hooks[i];
+            if (hook->id != id) continue;
+            if (!sites[i].valid) { ok = 0; break; }
+            gow3_cheat_build_stub(stubs + i * 256, hook, gow3_cheat_flag(id),
+                                  (uintptr_t)(image + sites[i].at + hook->length));
+        }
+        if (!ok) {
+            printf("FEX Cheats: %s unavailable (trampoline allocation)\n", gow3_cheat_names[id]);
+            continue;
+        }
+        protect(stubs, page_size, 5);
+        unsigned verified = 0;
+        uint64_t first = 0;
+        for (unsigned i = 0; i < GOW3_CHEAT_HOOK_COUNT; ++i) {
+            const Gow3CheatHook *hook = &gow3_cheat_hooks[i];
+            if (hook->id != id) continue;
+            if (!cheat_redirect_add((uintptr_t)(image + sites[i].at), (uintptr_t)(stubs + i * 256))) {
+                printf("FEX Cheats: %s unavailable (JIT hook rejected at 0x%lx)\n",
+                       gow3_cheat_names[id], (unsigned long)sites[i].at);
+                ok = 0;
+                break;
+            }
+            if (!verified) first = sites[i].at;
+            ++verified;
+        }
+        if (!ok) continue;
+        gow3_cheat_status(id);
+        printf("FEX Cheats: %s READY, %u verified site(s), selected=%d, first=0x%lx\n",
+               gow3_cheat_names[id], verified, 0, (unsigned long)first);
+    }
+}
+#endif
+
 /* G3PATCH2 (patches.py): the patches' image base, then byte writes at image offsets, applied
  * after relocation. A write may replace a whole base-relative pointer slot (60/90 FPS++ swap
  * function pointers): the patch holds the address at the patches' base, rebased here. */
-#endif
 
 static void apply_patches(const char *path, Segment *segments, uint64_t ns, const Reloc *relocs, uint64_t nr) {
     FILE *f=fopen(path,"rb");
@@ -855,16 +947,17 @@ int main(int argc, char **argv) {
     }
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
 #if defined(GUEST_CPU_NATIVE)
-    /* These hooks write x86-64 machine-code stubs straight into the image (0xe9 jumps), which is
-     * only meaningful when the game's code runs on the host CPU. Under the JIT the image is
-     * translated, so live code patching needs the JIT's own hook path (guest_cpu_hook, not yet
-     * wired here): the game runs without cheats, the health bar and the orb multipliers. */
+    /* x86-64 host: every installer writes 0xe9 machine-code jumps into the image (the guest runs
+     * on the host CPU). */
     if (gpu_enabled) install_orb_multiplier(app0, segments, ns, size);
     if (gpu_enabled) install_cheats(app0, segments, ns, size);
     if (gpu_enabled) install_actor_watch(app0, segments, ns, size);
     if (gpu_enabled) install_stat_multipliers(app0, segments, ns, size);
 #else
-    (void)segments; (void)ns;
+    /* FEX JIT: the cheat hooks are installed through guest_cpu_hook (syscall traps + rip redirect
+     * to trampoline stubs) in install_cheats. The orb/actor/stat multipliers still need their own
+     * JIT path; they are not installed here yet. */
+    if (gpu_enabled) install_cheats(app0, segments, ns, size);
 #endif
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));

@@ -251,12 +251,13 @@ public final class GameActivity extends Activity
 
         // 游戏内抽屉（refactor-game-drawer）：结构、tab、动画、scrim 全部封装在 GameDrawer，
         // Activity 只负责把三个视图挂入 screen 并委托 open/close。
-        // 隐藏入口（Game settings / Cheats / Graphics settings 对话框）仍按各自 spec 保持隐藏，
+        // 金手指已在抽屉 Cheats tab 暴露（7 个 cheat_* 键写 gow3.ini，重启生效）；
+        // 旧 Game settings / Graphics settings 对话框仍按各自 spec 保持隐藏。
         // 本次抽屉重构不恢复它们；接通时在对应 pane 里补行即可。
         drawer=new GameDrawer(this,this,this);
         screen.addView(drawer.handle(),frame(dp(4),dp(44),Gravity.LEFT|Gravity.CENTER_VERTICAL));
         screen.addView(drawer.scrim(),frame(-1,-1,Gravity.FILL));
-        screen.addView(drawer.view(),frame(dp(320),-1,Gravity.LEFT));
+        screen.addView(drawer.view(),frame(dp(drawer.widthDp()),-1,Gravity.LEFT));
         setContentView(screen);
     }
 
@@ -335,6 +336,27 @@ public final class GameActivity extends Activity
     @Override public boolean isPerfHudEnabled() { return perfHudEnabled(); }
 
     @Override public boolean isControllerEnabled() { return controllerEnabled(); }
+
+    // ---- 金手指：cheat_* 键写 gow3.ini，运行时 gow3_settings.cpp 在 guest 首次执行前读取。 ----
+    private static final String[] CHEAT_KEYS = {"cheat_health", "cheat_magic", "cheat_item", "cheat_rage",
+        "cheat_orbs", "cheat_very_hard", "cheat_double_jumps"};
+
+    @Override public boolean applyCheats(java.util.Map<String, String> updates) {
+        java.util.Map<String, String> writes = new java.util.LinkedHashMap<>();
+        for (String key : CHEAT_KEYS) {
+            String value = updates.get(key);
+            if (value != null) writes.put(key, value);
+        }
+        if (writes.isEmpty()) return true;
+        return Gow3Settings.update(configIni(), writes);
+    }
+
+    @Override public java.util.Map<String, String> cheatStates() {
+        java.util.Map<String, String> all = Gow3Settings.read(configIni());
+        java.util.Map<String, String> states = new java.util.LinkedHashMap<>();
+        for (String key : CHEAT_KEYS) states.put(key, all.get(key) == null ? "0" : all.get(key));
+        return states;
+    }
 
     // ---- GameDrawer.Listener：关闭动画结束、抽屉已隐藏 ----
 

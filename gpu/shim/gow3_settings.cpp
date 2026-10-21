@@ -70,6 +70,10 @@ bool Set(Values& v, const std::string& key, const std::string& value) {
             return true;
         }
     }
+    if (key == "auto_qte") {
+        v.auto_qte = i != 0;
+        return true;
+    }
     if (key == "upscaler") {
         for (int u = 0; u < UpscalerCount; ++u) {
             if (value == UpscalerName(u)) {
@@ -366,10 +370,10 @@ void Save() {
     std::fprintf(file, "blue_orb_multiplier=%.3f\n", v.blue_orb_multiplier.load());
     std::fprintf(file, "gold_orb_multiplier=%.3f\n", v.gold_orb_multiplier.load());
     std::fprintf(file, "cheat_health=%d\ncheat_magic=%d\ncheat_item=%d\ncheat_rage=%d\ncheat_orbs=%d\n"
-                       "cheat_very_hard=%d\ncheat_double_jumps=%d\n",
+                       "cheat_very_hard=%d\ncheat_double_jumps=%d\nauto_qte=%d\n",
                  int(v.cheats[0].load()), int(v.cheats[1].load()), int(v.cheats[2].load()),
                  int(v.cheats[3].load()), int(v.cheats[4].load()),
-                 int(v.cheats[5].load()), int(v.cheats[6].load()));
+                 int(v.cheats[5].load()), int(v.cheats[6].load()), int(v.auto_qte.load()));
     std::fprintf(file, "enemy_health_bar=%d\n", int(v.enemy_health_bar.load()));
     std::fprintf(file,
                  "overlay_fps=%d\noverlay_frametime=%d\noverlay_upscaler=%d\noverlay_gpu=%d\n"
