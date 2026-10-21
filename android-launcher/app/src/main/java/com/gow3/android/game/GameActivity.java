@@ -97,6 +97,9 @@ public final class GameActivity extends Activity
     private final AtomicBoolean imeAnswered=new AtomicBoolean();
     /** 文本框打开期间手柄的 Cross/Circle 要当作 OK/Cancel,需要拿到当前输入内容。 */
     private EditText imeField;
+    /** 文本框对话框本体：showIme() 建、onDismiss 清。imeGamepad() 要靠它 dismiss——
+     *  否则答案写给了游戏，对话框和软键盘却留在屏幕上且此后关不掉。 */
+    private AlertDialog imeDialog;
     /** 存档/读档/删除列表的原生对话框（独立组件，见 SaveDialogBridge）。 */
     private SaveDialogBridge saveDialog;
 
@@ -237,7 +240,7 @@ public final class GameActivity extends Activity
         status.setClickable(false);
 
         controllerOverlay=new TouchControllerOverlay(this,pad,prefs);
-        controllerOverlay.setVisibility(controllerEnabled() ? View.VISIBLE : View.GONE);
+        controllerOverlay.setActive(controllerEnabled());
         screen.addView(controllerOverlay,frame(-1,-1,Gravity.CENTER));
 
         // 性能 HUD（android-perf-hud-overlay）：叠在 controllerOverlay 之上、scrim/drawer 之下。
@@ -302,13 +305,18 @@ public final class GameActivity extends Activity
 
     @Override public void onToggleController() {
         boolean enabled=!controllerEnabled();
+        // 先写 prefs 再切可见性：两者由同一次调用同步，中途失败留下的也是一致状态。
         prefs.setControllerOverlayEnabled(enabled);
+        controllerOverlay.setActive(enabled);
         controllerOverlay.release();
         closeDrawer();
     }
 
     @Override public void onEditControllerLayout() {
         prefs.setControllerOverlayEnabled(true);
+        // 编辑条（RESET / − / DONE / +）只画在本控件上，必须先可见再进编辑模式，
+        // 否则 edit() 只是把 editing 置位并 invalidate()，画面上什么都不会出现。
+        controllerOverlay.setActive(true);
         closeDrawer();
         // 编辑虚拟按键时隐藏性能 HUD（避免遮挡编辑视图），DONE 后按设置恢复。
         perfHud.setActive(false);
@@ -334,8 +342,10 @@ public final class GameActivity extends Activity
 
     private void openDrawer() {
         if (drawer.isOpen()) return;
-        // 抽屉打开时释放屏幕控制器输入与手柄状态，避免抽屉打开期间误触游戏；可见性不动——
-        // scrim 全屏盖住 overlay 并拦截触摸，无需隐藏/恢复虚拟按键（修复开合抽屉后按键消失）。
+        // 抽屉打开时释放屏幕控制器输入与手柄状态，避免抽屉打开期间误触游戏。
+        // 可见性一律不动：归「On-screen controller」开关行所有（onToggleController /
+        // onEditControllerLayout / onCreate 三处走 controllerOverlay.setActive），
+        // 抽屉开合不再参与——scrim 全屏盖住 overlay 并拦截触摸，遮挡由 scrim 负责。
         controllerOverlay.release(); pad.reset();
         drawer.open();
     }
@@ -638,9 +648,14 @@ public final class GameActivity extends Activity
             dialog.dismiss(); answerIme(true,field.getText().toString()); return true;
         });
         dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
-        dialog.setOnDismissListener(d -> { imeOpen=false; imeField=null; immersive(); surface.requestFocus(); });
+        // imeOpen/imeField 的清理由 dismiss 一处统一承担（dismiss 不触发 setOnCancelListener，
+        // 那是返回键与点外部才走的路），这样 pollIme() 的 !imeOpen 才真正代表"对话框没开着"。
+        dialog.setOnDismissListener(d -> {
+            imeOpen=false; imeField=null; imeDialog=null; immersive(); surface.requestFocus();
+        });
         dialog.show(); field.requestFocus();
         imeField=field;
+        imeDialog=dialog;
     }
     /**
      * 文本框开着时,屏幕手柄的 Cross 当 OK、Circle 当 Cancel:AlertDialog 不会因为
@@ -655,8 +670,11 @@ public final class GameActivity extends Activity
         boolean circle=code==KeyEvent.KEYCODE_BUTTON_B || scan==305;
         if (!cross && !circle) return false;
         EditText field=imeField;
+        // 先写答案、后关对话框:dismiss 不触发 setOnCancelListener,答案必须显式先交给游戏,
+        // 否则游戏会一直等 ime.request.result(对照 SaveDialogBridge.answer() 的同款顺序)。
         answerIme(cross, cross && field!=null ? field.getText().toString() : "");
-        imeOpen=false; imeField=null;
+        // 关掉对话框才能收起软键盘;imeOpen/imeField 的清理由 setOnDismissListener 统一承担。
+        if (imeDialog!=null) imeDialog.dismiss();
         return true;
     }
     private void answerIme(boolean ok,String value) {
