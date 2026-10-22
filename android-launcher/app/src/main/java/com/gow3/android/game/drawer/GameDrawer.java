@@ -1,5 +1,6 @@
 package com.gow3.android.game.drawer;
 
+import android.app.AlertDialog;
 import android.content.Context;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
@@ -43,7 +44,7 @@ public final class GameDrawer {
     private FrameLayout contentHost;
     private final Map<DrawerTab, DrawerPane> panes = new HashMap<>();
     private final Map<DrawerTab, View> tabButtons = new HashMap<>();
-    private DrawerTab activeTab = DrawerTab.GAME;
+    private DrawerTab activeTab = DrawerTab.GRAPHICS;
     private boolean open;
 
     public GameDrawer(Context ctx, GameDrawerCallbacks callbacks, Listener listener) {
@@ -53,11 +54,10 @@ public final class GameDrawer {
         this.handle = buildHandle();
         this.scrim = buildScrim();
         this.drawer = buildDrawer();
-        registerPane(new GamePane(ctx, callbacks));
         registerPane(new GraphicsPane(ctx, callbacks));
         registerPane(new CheatsPane(ctx, callbacks));
         registerPane(new ControlsPane(ctx, callbacks));
-        selectTab(DrawerTab.GAME, false);
+        selectTab(DrawerTab.GRAPHICS, false);
     }
 
     /** 左缘拉手（游戏侧），GameActivity 挂入屏幕并摆放。 */
@@ -80,7 +80,6 @@ public final class GameDrawer {
     }
 
     private DrawerTab tabOf(DrawerPane pane) {
-        if (pane instanceof GamePane) return DrawerTab.GAME;
         if (pane instanceof GraphicsPane) return DrawerTab.GRAPHICS;
         if (pane instanceof CheatsPane) return DrawerTab.CHEATS;
         if (pane instanceof ControlsPane) return DrawerTab.CONTROLS;
@@ -194,6 +193,46 @@ public final class GameDrawer {
             tabButtons.put(tab, btn);
             tabStrip.addView(btn, new LinearLayout.LayoutParams(-1, -2));
         }
+        // 退出游戏固定在 rail 底部：弹性占位把按钮压到底部，任何 tab 与滚动位置都可见。
+        // 仍走确认对话框，避免在长列表里误触直接结束游戏。
+        tabStrip.addView(new View(ctx), new LinearLayout.LayoutParams(-1, 0, 1));
+        ImageView quit = new ImageView(ctx);
+        quit.setImageResource(R.drawable.ic_exit);
+        // 原图标是战神金色，压在红底上对比度不足；统一染白。
+        quit.setImageTintList(android.content.res.ColorStateList.valueOf(0xffffffff));
+        quit.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        quit.setPadding(dp(11), dp(11), dp(11), dp(11));
+        quit.setContentDescription(ctx.getString(R.string.drawer_title_quit));
+        quit.setFocusable(true);
+        quit.setClickable(true);
+        quit.setBackground(quitButtonBackground());
+        quit.setOnClickListener(v -> confirmQuit());
+        tabStrip.addView(quit, new LinearLayout.LayoutParams(dp(44), dp(44)));
+    }
+
+    /** 退出确认对话框：与原来 Game tab 的退出行为一致。 */
+    private void confirmQuit() {
+        new AlertDialog.Builder(ctx)
+            .setTitle(R.string.drawer_confirm_quit_title)
+            .setMessage(R.string.drawer_confirm_quit_message)
+            .setNegativeButton(R.string.drawer_confirm_cancel, null)
+            .setPositiveButton(R.string.drawer_confirm_quit_ok, (d, w) -> callbacks.quitGame())
+            .show();
+    }
+
+    /** 退出按钮底色：常态战神红（破坏性操作一眼可辨），按压加深、聚焦描金。 */
+    private StateListDrawable quitButtonBackground() {
+        StateListDrawable states = new StateListDrawable();
+        GradientDrawable base = new GradientDrawable();
+        base.setColor(0xffb8172b); base.setCornerRadius(dp(10));
+        GradientDrawable pressed = new GradientDrawable();
+        pressed.setColor(0xff8f1120); pressed.setCornerRadius(dp(10));
+        GradientDrawable focused = new GradientDrawable();
+        focused.setColor(0xffb8172b); focused.setCornerRadius(dp(10)); focused.setStroke(dp(1), 0xffc6ad76);
+        states.addState(new int[] { android.R.attr.state_pressed }, pressed);
+        states.addState(new int[] { android.R.attr.state_focused }, focused);
+        states.addState(new int[] { }, base);
+        return states;
     }
 
     private StateListDrawable tabButtonBackground() {

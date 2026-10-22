@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 分享日志的临时归档只落在 cacheDir/share/ 下，因此只映射该子目录：
-     logs、gow3.ini、存档等应用私有文件都不在可分享范围内。 -->
+<!-- 分享日志的临时归档只落在 cacheDir/share/ 下，因此只映射该子目录；
+     日志、gow3.ini、存档等应用私有文件都不在可分享范围内。Mods 页「打开模组文件夹」
+     额外映射 gow3data/mods/（玩家自己放置的模组内容，仅该子目录可被浏览）。 -->
 <paths>
     <cache-path name="shared_logs" path="share/" />
+    <files-path name="mods_folder" path="gow3data/mods/" />
 </paths>

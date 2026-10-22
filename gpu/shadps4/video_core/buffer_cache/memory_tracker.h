@@ -14,6 +14,7 @@
 #include "common/types.h"
 #include "core/emulator_settings.h"
 #include "video_core/buffer_cache/region_manager.h"
+#include "video_core/buffer_cache/copy_ranges.h"
 
 namespace VideoCore {
 
@@ -127,6 +128,32 @@ public:
                                     manager->GetCpuAddr() + offset, size);
                                 manager->lock.unlock();
                             });
+    }
+
+    // 输入已排序且无重叠；同一 region 只加锁一次，完成上传后才启用 GPU 写保护。
+    void ForEachUploadRanges(VAddr base, std::span<const CopyRange> ranges, bool is_written,
+                             auto&& func, auto&& on_upload) {
+        std::vector<std::unique_lock<LockType>> locks;
+        RegionManager* previous = nullptr;
+        for (auto [offset, length] : ranges) {
+            IteratePages<true>(base + offset, length, [&](RegionManager* manager, u64 at, size_t size) {
+                if (manager != previous) {
+                    locks.emplace_back(manager->lock);
+                    previous = manager;
+                }
+                manager->template ForEachModifiedRange<Type::CPU, true>(
+                    manager->GetCpuAddr() + at, size, func);
+            });
+        }
+        on_upload();
+        if (is_written) {
+            for (auto [offset, length] : ranges) {
+                IteratePages<false>(base + offset, length, [&](RegionManager* manager, u64 at, size_t size) {
+                    manager->template ChangeRegionState<Type::GPU, true>(
+                        manager->GetCpuAddr() + at, size);
+                });
+            }
+        }
     }
 
     /// Call 'func' for each GPU modified range and unmark those pages as GPU modified

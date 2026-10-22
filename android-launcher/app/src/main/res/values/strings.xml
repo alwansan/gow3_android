@@ -338,9 +338,31 @@
 
     <!-- Mods 页 -->
     <string name="mods_title">MOD &amp; PATCH</string>
-    <string name="mods_description">Choose patches for the selected game. Changes apply the next time you start the game.</string>
+    <string name="mods_description">Game patches and file mods for the selected game. Changes apply the next time you start the game.</string>
     <string name="mods_empty_title">NO MODS INSTALLED</string>
     <string name="mods_empty_description">Your mod and patch list will appear here.</string>
+    <string name="mods_load_title">Load mods</string>
+    <string name="mods_load_hint">Off loads no mod file and no mod patch. Changes apply on the next start.</string>
+    <string name="mods_files_title">File mods</string>
+    <string name="mods_files_count">%1$d of %2$d active</string>
+    <string name="mods_refresh">REFRESH</string>
+    <string name="mods_files_empty">No mods found. Copy a mod folder (or a .zip) into the mods folder and press Refresh. A mod replaces whole game files; the game folder is never changed.</string>
+    <string name="mods_conflicts">⚠ %1$d files are changed by more than one mod. The lower mod in the list wins.</string>
+    <string name="mods_conflict_warning">conflicts on files; a lower mod wins them</string>
+    <string name="mods_presets_title">Presets</string>
+    <string name="mods_presets_hint">save the order and which mods are disabled</string>
+    <string name="mods_presets_empty">No presets saved.</string>
+    <string name="mods_presets_load">LOAD</string>
+    <string name="mods_presets_delete">DELETE</string>
+    <string name="mods_presets_save">SAVE</string>
+    <string name="mods_folder">Folder: %1$s</string>
+    <string name="mods_open_folder">OPEN FOLDER</string>
+    <string name="mods_tab_mods">MODS</string>
+    <string name="mods_tab_patches">PATCHES</string>
+    <string name="mods_import_zip">IMPORT .ZIP</string>
+    <string name="mods_import_folder">IMPORT FOLDER</string>
+    <string name="mods_imported_fmt">Imported “%1$s”.</string>
+    <string name="mods_import_failed">The mod could not be imported.</string>
 
     <!-- 数据层消息 -->
     <string name="no_file_picker_fmt">No file picker is available on this device (%1$s).</string>

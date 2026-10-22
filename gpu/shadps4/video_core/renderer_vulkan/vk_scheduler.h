@@ -29,6 +29,7 @@
 #include "video_core/renderer_vulkan/vk_render_pass_pairing.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
 #include "video_core/renderer_vulkan/vk_semaphore.h"
+#include "video_core/renderer_vulkan/vk_submit_info.h"
 
 namespace tracy {
 class VkCtxScope;
@@ -67,42 +68,6 @@ struct RenderState {
     }
 };
 static_assert(std::has_unique_object_representations_v<RenderState>);
-
-struct SubmitInfo {
-    std::array<vk::Semaphore, 4> wait_semas;
-    std::array<u64, 4> wait_ticks;
-    std::array<vk::Semaphore, 4> signal_semas;
-    std::array<u64, 4> signal_ticks;
-    vk::Fence fence;
-    u32 num_wait_semas;
-    u32 num_signal_semas;
-
-    void AddWait(vk::Semaphore semaphore, u64 tick = 1) {
-        // A null handle is not a valid VkSemaphore: it reaches vkQueueSubmit as an entry of
-        // pWaitSemaphores and the driver dereferences it (Adreno faults at vkQueueSubmit+0x102dc0,
-        // address 0x108). The AHB swapchain hands out a null acquire semaphore on the first use of
-        // a buffer - the one frame that needs no wait - so drop those instead of submitting them.
-        // Dropping keeps the arrays consistent: num_wait_semas does not grow, so wait_ticks and
-        // the timeline submit info's waitSemaphoreValueCount stay paired with the handles.
-        if (semaphore == vk::Semaphore{}) {
-            return;
-        }
-        wait_semas[num_wait_semas] = semaphore;
-        wait_ticks[num_wait_semas++] = tick;
-    }
-
-    void AddSignal(vk::Semaphore semaphore, u64 tick = 1) {
-        if (semaphore == vk::Semaphore{}) {
-            return;
-        }
-        signal_semas[num_signal_semas] = semaphore;
-        signal_ticks[num_signal_semas++] = tick;
-    }
-
-    void AddSignal(vk::Fence fence) {
-        this->fence = fence;
-    }
-};
 
 using Viewports = boost::container::static_vector<vk::Viewport, AmdGpu::NUM_VIEWPORTS>;
 using Scissors = boost::container::static_vector<vk::Rect2D, AmdGpu::NUM_VIEWPORTS>;

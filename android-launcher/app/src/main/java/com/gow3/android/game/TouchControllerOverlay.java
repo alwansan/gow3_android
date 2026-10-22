@@ -142,6 +142,11 @@ final class TouchControllerOverlay extends View {
         pad.virtual(pressed,lx,ly,rx,ry,left,right,l2,r2);
         invalidate();
     }
+    /** 开关屏幕控制器并同步可见性；与同目录 PerfHudOverlay.setActive() 同形，启动恢复与抽屉
+     *  「On-screen controller」行都走这里。可见性归该开关行所有，抽屉开合不参与：scrim 已全屏
+     *  覆盖并拦截触摸（spec「抽屉打开期间由全屏遮罩覆盖并拦截触摸」）。只切可见性，不触碰
+     *  按键、布局与编辑状态。 */
+    void setActive(boolean on) { setVisibility(on ? VISIBLE : GONE); }
     void release() { controls.clear(); positions.clear(); publish(); }
     void edit(Runnable done) { release(); editing=true; dragged=null; selected=null; onEditDone=done; invalidate(); }
     private void finishEdit() {

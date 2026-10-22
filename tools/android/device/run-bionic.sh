@@ -210,9 +210,10 @@ cd "$base"
 # runtime 与补丁规则 XML（assets/God_of_War_III_Remastered_*.xml）。玩家游戏派生产物
 # （boot-linked.bin、content.bin、patches.bin）单独部署到 base/data，不进 APK。
 if [ "${1:-game}" = game ]; then
-    game_dir=${GOW3_GAME_DIR:-$base/game}
+    # 启动器的升级合并视图同时用于编译与 app0；摘要不得回头校验基础游戏的 eboot。
+    game_dir=${GOW3_APP0_DIR:-${GOW3_GAME_DIR:-$base/game}}
     [ -f "$game_dir/eboot.bin" ] || { echo "Game missing: $game_dir" >&2; exit 2; }
-    app0_dir=${GOW3_APP0_DIR:-$game_dir}
+    app0_dir=$game_dir
     # launcher 启动前由 libgow3prepare 编译（compile_plan/publish_plan 的等价物）的单个补丁文件。
     [ -f "$base/data/patches.bin" ] || { echo "The patches are missing: $base/data/patches.bin (the launcher prepares them on launch)" >&2; exit 2; }
     # 身份校验：boot-linked.bin / content.bin / patches.bin 是针对某一个 eboot 派生的。换了游戏

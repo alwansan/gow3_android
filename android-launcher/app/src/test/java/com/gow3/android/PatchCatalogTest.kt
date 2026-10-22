@@ -4,6 +4,8 @@ import com.gow3.android.core.settings.Gow3Settings
 import com.gow3.android.data.CatalogProblem
 import com.gow3.android.data.PatchCatalog
 import com.gow3.android.data.PatchCatalogException
+import com.gow3.android.data.PatchSource
+import com.gow3.android.data.toNativeInput
 import com.gow3.android.data.model.LaunchParams
 import com.gow3.android.data.model.MobilePresets
 
@@ -215,5 +217,60 @@ class PatchCatalogTest {
         assertEquals(5, com.gow3.android.data.model.MobilePresets.available(loaded).size)
         assertTrue(loaded.selected(native + ("patches_CUSA01740_01_00" to "Skip Intro")).isEmpty())
         assertEquals(setOf("Skip Intro"), loaded.selected(native + (loaded.selectionKey to "Skip Intro")))
+    }
+
+    private fun modWithPatch(name: String, xml: String): File {
+        val folder = File(temp.root, "mods/$name/patches")
+        folder.mkdirs()
+        File(folder, "$name.xml").writeText(xml)
+        File(temp.root, "mods.json").writeText("""{"order":["$name"],"disabled":[]}""")
+        return File(temp.root, "mods")
+    }
+
+    private fun patchXml(title: String, vararg metas: String) =
+        "<Patch><TitleID><ID>$title</ID></TitleID>${metas.joinToString("")}</Patch>"
+
+    private fun metadata(name: String, version: String = "01.00") =
+        """<Metadata Name="$name" AppVer="$version" AppElf="eboot.bin">
+            <PatchList><Line Type="bytes" Address="0x00000000" Value="00" Pattern="00" At="0"/></PatchList>
+        </Metadata>"""
+
+    @Test fun `enabled mod patches merge into the catalog and replace built-in names`() {
+        val game = game("CUSA01740", "CUSA01740", "01.00")
+        val mods = modWithPatch("ModX",
+            patchXml("CUSA01740", metadata("Mod Custom Patch"), metadata("Disable Bloom")))
+        val loaded = PatchCatalog.load(game, null, mods, File(temp.root, "mods.json"), true) { File(catalogs, it).inputStream() }
+        assertEquals(15, loaded.patches.size)
+        assertEquals(PatchSource.MOD, loaded.patches.first { it.name == "Disable Bloom" }.source)
+        assertTrue(loaded.patches.any { it.name == "Mod Custom Patch" && it.source == PatchSource.MOD })
+        assertTrue(loaded.toNativeInput().contains("Mod Custom Patch"))
+    }
+
+    @Test fun `master switch off excludes mod patches`() {
+        val game = game("CUSA01740", "CUSA01740", "01.00")
+        val mods = modWithPatch("ModX", patchXml("CUSA01740", metadata("Mod Custom Patch")))
+        val loaded = PatchCatalog.load(game, null, mods, File(temp.root, "mods.json"), false) { File(catalogs, it).inputStream() }
+        assertEquals(14, loaded.patches.size)
+        assertFalse(loaded.patches.any { it.name == "Mod Custom Patch" })
+        assertFalse(loaded.toNativeInput().contains("Mod Custom Patch"))
+    }
+
+    @Test fun `mod patch for another title or version is filtered`() {
+        val game = game("CUSA01740", "CUSA01740", "01.00")
+        val mods = modWithPatch("ModX", patchXml("CUSA01623", metadata("Wrong Title"), metadata("Other Version", "01.02")))
+        val loaded = PatchCatalog.load(game, null, mods, File(temp.root, "mods.json"), true) { File(catalogs, it).inputStream() }
+        assertEquals(14, loaded.patches.size)
+        assertFalse(loaded.patches.any { it.name == "Wrong Title" })
+    }
+
+    @Test fun `broken mod patch is skipped without blocking the catalog`() {
+        val game = game("CUSA01740", "CUSA01740", "01.00")
+        val folder = File(temp.root, "mods/ModX/patches")
+        folder.mkdirs()
+        File(folder, "broken.xml").writeText("this is not xml")
+        File(temp.root, "mods.json").writeText("""{"order":["ModX"],"disabled":[]}""")
+        val loaded = PatchCatalog.load(game, null, File(temp.root, "mods"), File(temp.root, "mods.json"), true) { File(catalogs, it).inputStream() }
+        assertEquals(14, loaded.patches.size)
+        assertTrue(loaded.patches.all { it.source == PatchSource.BUILTIN })
     }
 }

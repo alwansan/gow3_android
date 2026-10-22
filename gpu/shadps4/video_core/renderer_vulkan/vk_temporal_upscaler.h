@@ -123,8 +123,9 @@ public:
         vk::Image image;
         vk::Format format;
         u32 width, height;
+        vk::ImageView view{};
     };
-    bool DisplayOverride(VAddr address, Display& display);
+    bool DisplayOverride(VAddr address, Display& display, vk::Format view_format);
 
 private:
     /// gow3: views of guest images the upscaler reads, kept across frames: FSR 4 registers
@@ -290,10 +291,12 @@ private:
     vk::UniquePipelineLayout taa_sharpen_pipeline_layout;
     vk::UniquePipeline taa_sharpen_pipeline;
     vk::UniquePipeline taa_sharpen_ldr_pipeline;
+    vk::UniquePipeline extra_sharpen_half_pipeline;
     // ExtraSharpen: a copy of the upscaled frame (RCAS reads neighbours) and the target views.
     VideoCore::UniqueImage extra_sharpen_image;
     vk::UniqueImageView extra_sharpen_view;
     u32 extra_sharpen_width = 0, extra_sharpen_height = 0;
+    vk::Format extra_sharpen_format = vk::Format::eUndefined;
     vk::UniqueImageView ui_storage_view;
 };
 

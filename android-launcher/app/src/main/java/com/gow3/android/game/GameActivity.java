@@ -31,10 +31,14 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.ConcurrentHashMap;
 import com.gow3.android.core.settings.FrameGenSettings;
 import com.gow3.android.core.settings.GamePrefs;
 import com.gow3.android.core.settings.Gow3Settings;
 import com.gow3.android.Gow3App;
+import com.gow3.android.data.GameUpdateView;
+import com.gow3.android.data.Gow3Prepare;
+import com.gow3.android.data.ModGameView;
 import com.gow3.android.game.drawer.GameDrawer;
 import com.gow3.android.game.drawer.GameDrawerCallbacks;
 
@@ -65,6 +69,8 @@ public final class GameActivity extends Activity
     private PadBridge pad;
     private AudioBridge audio;
     private volatile Process game;
+    private final Map<Process,GameUpdateView> gameViews=new ConcurrentHashMap<>();
+    private final Map<Process,ModGameView> modViews=new ConcurrentHashMap<>();
     private volatile int shmid=-1;
     private volatile boolean destroyed;
     /** 报告 LSFG 运行时失败并自动回退后置位：刷新率要退回「无 LSFG」的目标，避免
@@ -93,6 +99,9 @@ public final class GameActivity extends Activity
     private final AtomicBoolean imeAnswered=new AtomicBoolean();
     /** 文本框打开期间手柄的 Cross/Circle 要当作 OK/Cancel,需要拿到当前输入内容。 */
     private EditText imeField;
+    /** 文本框对话框本体：showIme() 建、onDismiss 清。imeGamepad() 要靠它 dismiss——
+     *  否则答案写给了游戏，对话框和软键盘却留在屏幕上且此后关不掉。 */
+    private AlertDialog imeDialog;
     /** 存档/读档/删除列表的原生对话框（独立组件，见 SaveDialogBridge）。 */
     private SaveDialogBridge saveDialog;
 
@@ -233,7 +242,7 @@ public final class GameActivity extends Activity
         status.setClickable(false);
 
         controllerOverlay=new TouchControllerOverlay(this,pad,prefs);
-        controllerOverlay.setVisibility(controllerEnabled() ? View.VISIBLE : View.GONE);
+        controllerOverlay.setActive(controllerEnabled());
         screen.addView(controllerOverlay,frame(-1,-1,Gravity.CENTER));
 
         // 性能 HUD（android-perf-hud-overlay）：叠在 controllerOverlay 之上、scrim/drawer 之下。
@@ -260,10 +269,6 @@ public final class GameActivity extends Activity
     }
 
     // ---- GameDrawerCallbacks：抽屉面板经此接口触发动作与读取当前值 ----
-
-    @Override public void resumeGame() { closeDrawer(); }
-
-    @Override public void requestRestart() { restartGame(); }
 
     @Override public void quitGame() { finish(); }
 
@@ -299,14 +304,18 @@ public final class GameActivity extends Activity
 
     @Override public void onToggleController() {
         boolean enabled=!controllerEnabled();
-
+        // 先写 prefs 再切可见性：两者由同一次调用同步，中途失败留下的也是一致状态。
         prefs.setControllerOverlayEnabled(enabled);
+        controllerOverlay.setActive(enabled);
         controllerOverlay.release();
         closeDrawer();
     }
 
     @Override public void onEditControllerLayout() {
         prefs.setControllerOverlayEnabled(true);
+        // 编辑条（RESET / − / DONE / +）只画在本控件上，必须先可见再进编辑模式，
+        // 否则 edit() 只是把 editing 置位并 invalidate()，画面上什么都不会出现。
+        controllerOverlay.setActive(true);
         closeDrawer();
         // 编辑虚拟按键时隐藏性能 HUD（避免遮挡编辑视图），DONE 后按设置恢复。
         perfHud.setActive(false);
@@ -353,8 +362,10 @@ public final class GameActivity extends Activity
 
     private void openDrawer() {
         if (drawer.isOpen()) return;
-        // 抽屉打开时释放屏幕控制器输入与手柄状态，避免抽屉打开期间误触游戏；可见性不动——
-        // scrim 全屏盖住 overlay 并拦截触摸，无需隐藏/恢复虚拟按键（修复开合抽屉后按键消失）。
+        // 抽屉打开时释放屏幕控制器输入与手柄状态，避免抽屉打开期间误触游戏。
+        // 可见性一律不动：归「On-screen controller」开关行所有（onToggleController /
+        // onEditControllerLayout / onCreate 三处走 controllerOverlay.setActive），
+        // 抽屉开合不再参与——scrim 全屏盖住 overlay 并拦截触摸，遮挡由 scrim 负责。
         controllerOverlay.release(); pad.reset();
         drawer.open();
     }
@@ -478,7 +489,7 @@ public final class GameActivity extends Activity
         }
     }
 
-    private Process process(String... args) throws java.io.IOException {
+    private Process process(File app0, String... args) throws java.io.IOException {
         ProcessBuilder b=new ProcessBuilder(args).redirectErrorStream(true);
         Map<String,String> env=b.environment(); env.clear();
         // Bionic: no rootfs, so the environment is the platform's - toybox paths, the Bionic
@@ -495,6 +506,9 @@ public final class GameActivity extends Activity
             env.put("GOW3_LOG_DIR",DATA+"/logs");
         if (gameDir!=null) env.put("GOW3_GAME_DIR",gameDir);
         if (updateDir!=null) env.put("GOW3_PATCH_DIR",updateDir);
+        // 最终有效视图（基础 + 更新 + 启用模组）由 libgow3prepare 编译补丁时同一份，
+        // 运行时从这里启动；玩家游戏、更新与模组文件只读。
+        env.put("GOW3_APP0_DIR",app0.getAbsolutePath());
         return b.start();
     }
     private void startX(SurfaceHolder holder) {
@@ -656,9 +670,14 @@ public final class GameActivity extends Activity
             dialog.dismiss(); answerIme(true,field.getText().toString()); return true;
         });
         dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
-        dialog.setOnDismissListener(d -> { imeOpen=false; imeField=null; immersive(); surface.requestFocus(); });
+        // imeOpen/imeField 的清理由 dismiss 一处统一承担（dismiss 不触发 setOnCancelListener，
+        // 那是返回键与点外部才走的路），这样 pollIme() 的 !imeOpen 才真正代表"对话框没开着"。
+        dialog.setOnDismissListener(d -> {
+            imeOpen=false; imeField=null; imeDialog=null; immersive(); surface.requestFocus();
+        });
         dialog.show(); field.requestFocus();
         imeField=field;
+        imeDialog=dialog;
     }
     /**
      * 文本框开着时,屏幕手柄的 Cross 当 OK、Circle 当 Cancel:AlertDialog 不会因为
@@ -673,8 +692,11 @@ public final class GameActivity extends Activity
         boolean circle=code==KeyEvent.KEYCODE_BUTTON_B || scan==305;
         if (!cross && !circle) return false;
         EditText field=imeField;
+        // 先写答案、后关对话框:dismiss 不触发 setOnCancelListener,答案必须显式先交给游戏,
+        // 否则游戏会一直等 ime.request.result(对照 SaveDialogBridge.answer() 的同款顺序)。
         answerIme(cross, cross && field!=null ? field.getText().toString() : "");
-        imeOpen=false; imeField=null;
+        // 关掉对话框才能收起软键盘;imeOpen/imeField 的清理由 setOnDismissListener 统一承担。
+        if (imeDialog!=null) imeDialog.dismiss();
         return true;
     }
     private void answerIme(boolean ok,String value) {
@@ -740,37 +762,36 @@ public final class GameActivity extends Activity
      * The Bionic runtime needs the game's derived inputs before it starts: the patch blob, the
      * AppContent profile and launch.env. The glibc build produced these with the Python scripts in
      * a rootfs or on a host; here libgow3prepare compiles them from the installed game. Returns
-     * false and reports when the game cannot be prepared, so a stale run never starts.
+     * null 并报错表示准备失败，避免启动旧的派生产物；成功结果持有本轮有效游戏视图。
      */
-    private boolean prepareBionicGame() {
+    private Gow3Prepare.Result prepareBionicGame() {
         try {
             File game=new File(gameDir);
             File update=updateDir!=null && !updateDir.isEmpty() ? new File(updateDir) : null;
             com.gow3.android.data.PatchCatalog catalog=
                     com.gow3.android.data.PatchCatalog.Companion.load(game, update, getAssets());
             java.util.Map<String,String> ini=Gow3Settings.read(configIni());
-            com.gow3.android.data.Gow3Prepare.Result result=
-                    com.gow3.android.data.Gow3Prepare.INSTANCE.prepare(this,game,update,catalog,ini);
+            Gow3Prepare.Result result=Gow3Prepare.prepare(this,game,update,catalog,ini);
             android.util.Log.i("God of War III",
                     "bionic prepare: "+result.getReason()+"; applied="+result.getApplied()
                             +"; writes="+result.getWriteCount()+"; dmem="+result.getDmemMb()
                             +"; vblank="+result.getVblankHz());
             if (!result.getOk()) {
                 error("Game preparation failed ("+result.getReason()+"): "+result.getMessage());
-                return false;
+                return null;
             }
-            return true;
+            return result;
         } catch (com.gow3.android.data.PatchCatalogException ex) {
             error("This game's patch set is not available: "+ex.getProblem());
-            return false;
+            return null;
         } catch (java.io.IOException ex) {
             android.util.Log.e("God of War III","bionic prepare: cannot read the patch catalogue",ex);
             error("Game preparation failed: "+ex);
-            return false;
+            return null;
         } catch (Exception ex) {
             android.util.Log.e("God of War III","bionic prepare failed",ex);
             error("Game preparation failed: "+ex);
-            return false;
+            return null;
         }
     }
     private void startGame() {
@@ -790,7 +811,16 @@ public final class GameActivity extends Activity
         // 帧生成遥测（framegen.stats）是会话态文件：启动兜底删除，防止上一会话残留被
         // 性能 HUD 当成实时插帧遥测（显示「LSFG Nx」）；游戏侧 presenter 也会在引擎不活跃时清除。
         new File(DATA,"framegen.stats").delete();
-        if (!prepareBionicGame()) return;
+        Gow3Prepare.Result prepared=prepareBionicGame();
+        if (prepared==null) return;
+        final GameUpdateView view=prepared.getGameView();
+        if (view==null) {
+            error("Game preparation did not return its effective game view.");
+            return;
+        }
+        final ModGameView modView=prepared.getModView();
+        final File app0=modView!=null ? modView.getDirectory() : view.getDirectory();
+        if (destroyed) { closeView(view); if (modView!=null) closeModView(modView); return; }
         // 上一轮日志保留一代：写新的 android-game.log 前把旧的轮转为 android-game.prev.log，
         // 使崩溃日志在重启后不丢，并随日志导出一起打包。轮转失败时忽略，照常写新日志。
         File logDir=new File(DATA,"logs");
@@ -800,10 +830,21 @@ public final class GameActivity extends Activity
             if (!gameLog.renameTo(previous))
                 android.util.Log.w("God of War III","log rotation: could not rename android-game.log to android-game.prev.log");
         }
+        Process child=null;
         try {
             // /system/bin/sh pulls run-bionic.sh directly (toybox): no rootfs loader, no X11.
-            final Process launched=process("/system/bin/sh",BASE+"/run-bionic.sh","game");
+            final Process launched=process(app0,"/system/bin/sh",BASE+"/run-bionic.sh","game");
+            child=launched;
+            gameViews.put(launched,view);
+            if (modView!=null) modViews.put(launched,modView);
             game=launched;
+            if (destroyed) {
+                launched.destroyForcibly();
+                try { launched.waitFor(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                if (game==launched) game=null;
+                closeGameView(launched);
+                return;
+            }
             Thread log=new Thread(() -> {
                 try (BufferedReader r=new BufferedReader(new InputStreamReader(launched.getInputStream()));
                      PrintWriter out=new PrintWriter(new File(DATA,"logs/android-game.log"))) {
@@ -822,9 +863,22 @@ public final class GameActivity extends Activity
                     // A restart (settings, cheats) kills this process on purpose: its reader is
                     // interrupted then, after the next game started. Only the current game's errors show.
                     if (!destroyed && game==launched) error(ex.toString());
+                } finally {
+                    closeGameView(launched);
                 }
             },"God of War III-log"); log.setDaemon(true); log.start();
-        } catch (Exception ex) { error(ex.toString()); }
+        } catch (Exception ex) {
+            if (child!=null) {
+                child.destroyForcibly();
+                try { child.waitFor(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                if (game==child) game=null;
+                closeGameView(child);
+            } else {
+                closeView(view);
+                if (modView!=null) closeModView(modView);
+            }
+            error(ex.toString());
+        }
     }
     private void error(String message) {
         hadError=true;
@@ -836,9 +890,27 @@ public final class GameActivity extends Activity
         if (p!=null) {
             p.destroyForcibly();
             try { p.waitFor(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            closeGameView(p);
         }
         shmid=-1; // 同上：游戏进程没了，surface 重建只能走完整的用户启动流程
         Gow3Present.stop();
+    }
+    private static void closeView(GameUpdateView view) {
+        try { view.close(); }
+        catch (Exception ex) { android.util.Log.w("God of War III","Cannot remove game update view",ex); }
+    }
+    private static void closeModView(ModGameView view) {
+        try { view.close(); }
+        catch (Exception ex) { android.util.Log.w("God of War III","Cannot remove mod view",ex); }
+    }
+    private void closeGameView(Process process) {
+        // 旧日志线程只能归还自己的视图，且必须等 child 确认退出。
+        if (process==null || process.isAlive()) return;
+        // 模组视图先关：它链接进 game-update 视图，必须先删链接层再删被链接层。
+        ModGameView modView=modViews.remove(process);
+        if (modView!=null) closeModView(modView);
+        GameUpdateView view=gameViews.remove(process);
+        if (view!=null) closeView(view);
     }
     @Override protected void onDestroy() {
         destroyed=true; pad.reset(); audio.stop(); main.removeCallbacksAndMessages(null);
@@ -859,6 +931,8 @@ public final class GameActivity extends Activity
                 }
             } catch (RuntimeException ignored) {
                 // Teardown is best effort: the activity is already going away.
+            } finally {
+                closeGameView(p);
             }
         },"gow3-teardown").start();
         super.onDestroy();

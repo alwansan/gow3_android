@@ -14,6 +14,7 @@
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_swapchain_ahb.h"
+#include "video_core/renderer_vulkan/sync_file_poll.h"
 
 namespace Vulkan {
 
@@ -40,16 +41,6 @@ u32 BufferCount(u32 lsfg_multiplier = 0) {
     return 3;
 }
 
-/// Waits (up to timeout_ms) for a sync file to signal. True when signaled.
-bool WaitSyncFile(int fd, int timeout_ms) {
-    pollfd pfd{fd, POLLIN, 0};
-    int ready;
-    do {
-        ready = poll(&pfd, 1, timeout_ms);
-    } while (ready < 0 && errno == EINTR);
-    return ready > 0;
-}
-
 } // namespace
 
 u32 Swapchain::MaxImageCount() {
@@ -60,6 +51,12 @@ Swapchain::Swapchain(const Instance& instance_, const Frontend::WindowSDL& windo
                      u32 lsfg_multiplier)
     : instance{instance_}, window{window_} {
     image_count = BufferCount(lsfg_multiplier);
+    const auto sync_mode = Framegen::SyncModeFromEnv("GOW3_AHB_SYNC");
+    // Turnip 交给 sync-fd 传递完成依赖；complete 可回退逐帧 CPU 等待。
+    async_present = Framegen::UseAsync(sync_mode, instance.GetDriverID() == vk::DriverId::eMesaTurnip);
+    LOG_INFO(Render_Vulkan, "AHB sync: {} ({})", async_present ? "async" : "complete",
+             sync_mode != Framegen::SyncMode::Auto ? "explicit override" :
+                 async_present ? "Turnip sync-fd policy" : "conservative driver policy");
     const vk::PhysicalDeviceExternalSemaphoreInfo semaphore_info{
         .handleType = vk::ExternalSemaphoreHandleTypeFlagBits::eSyncFd,
     };
@@ -328,6 +325,10 @@ void Swapchain::HandleRelease(Gow3Present::Release& release) {
         return;
     }
     Buffer& buffer = buffers[release.index];
+    if (!buffer.lease.Release()) {
+        if (release.fence_fd >= 0) close(release.fence_fd);
+        return;
+    }
     if (buffer.release_fd >= 0) {
         close(buffer.release_fd);
     }
@@ -340,19 +341,9 @@ bool Swapchain::AcquireNextImage() {
         needs_recreation = true;
         return false;
     }
+    DrainReleases();
     Gow3Present::Release release;
-    // Releases that arrived meanwhile.
-    while (client.Connected()) {
-        const int got = client.WaitRelease(release, 0);
-        if (got < 0) {
-            PeerGone();
-        }
-        if (got == 0) {
-            break;
-        }
-        HandleRelease(release);
-    }
-    // All buffers are at the app: the display is slower than the game. Wait for one.
+    // 真实帧保留既有阻塞获取语义。
     const auto wait_start = std::chrono::steady_clock::now();
     bool warned = false;
     while (free_queue.empty()) {
@@ -369,18 +360,70 @@ bool Swapchain::AcquireNextImage() {
     }
     image_index = free_queue.front();
     free_queue.pop_front();
-    ImportAcquire(image_index);
-    return !needs_recreation;
+    const auto token = buffers[image_index].lease.Reserve(generation, image_index);
+    ASSERT(token.serial != 0);
+    return ImportAcquire(image_index) && !needs_recreation;
 }
 
-void Swapchain::ImportAcquire(u32 index) {
+void Swapchain::DrainReleases() {
+    Gow3Present::Release release;
+    while (client.Connected()) {
+        const int got = client.WaitRelease(release, 0);
+        if (got < 0) {
+            PeerGone();
+        }
+        if (got == 0) {
+            break;
+        }
+        HandleRelease(release);
+    }
+}
+
+Swapchain::Reservation Swapchain::CurrentReservation() const {
+    if (image_index >= buffers.size() || !buffers[image_index].lease.reserved) return {};
+    return {generation, image_index, buffers[image_index].lease.serial};
+}
+
+bool Swapchain::Select(Reservation token) {
+    if (token.index >= buffers.size() ||
+        !buffers[token.index].lease.Matches(token, generation)) return false;
+    image_index = token.index;
+    return true;
+}
+
+void Swapchain::Cancel(Reservation token) {
+    if (token.index < buffers.size() && buffers[token.index].lease.Cancel(token, generation)) {
+        // 尚未消费的临时导入保留在 buffer 上，下一次实际提交继续使用。
+        free_queue.push_back(token.index);
+    }
+}
+
+bool Swapchain::TryReserve(Reservation& token) {
+    token = {};
+    if (zero_extent || needs_recreation || buffers.empty()) return false;
+    DrainReleases();
+    const size_t candidates = free_queue.size();
+    for (size_t i = 0; i < candidates; ++i) {
+        const u32 index = free_queue.front();
+        free_queue.pop_front();
+        if (!ImportAcquire(index, true)) {
+            free_queue.push_back(index);
+            continue;
+        }
+        token = buffers[index].lease.Reserve(generation, index);
+        ASSERT(token.serial != 0);
+        return true;
+    }
+    return false;
+}
+
+bool Swapchain::ImportAcquire(u32 index, bool nonblocking) {
     Buffer& buffer = buffers[index];
-    buffer.acquire_imported = false;
+    if (buffer.acquire_imported) return true;
     const int fd = buffer.release_fd;
     if (fd < 0) {
-        return; // never shown, or released at once: nothing to wait for
+        return true;
     }
-    buffer.release_fd = -1;
     // GOW3_AHB_NO_IMPORT=1 takes the CPU-wait path for every release fence: the sync file is waited
     // on with poll() instead of imported as a semaphore. Isolates a fault in
     // vkImportSemaphoreFdKHR (the app's fence, produced by the compositor) from the rest of the
@@ -398,19 +441,25 @@ void Swapchain::ImportAcquire(u32 index) {
         };
         const auto result = instance.GetDevice().importSemaphoreFdKHR(import_info);
         if (result == vk::Result::eSuccess) {
+            buffer.release_fd = -1;
             buffer.acquire_imported = true; // the driver owns the fd now
-            return;
+            return true;
         }
         LOG_WARNING(Render_Vulkan,
                     "Importing the release fence failed ({}): waiting for fences on the CPU instead",
                     vk::to_string(result));
         sync_import_ok = false;
     }
-    // CPU wait: the fence signals when the display is done with the buffer.
-    while (!WaitSyncFile(fd, 1000)) {
+    if (nonblocking && Framegen::PollSyncFile(fd, 0) != 1) return false;
+    while (!nonblocking) {
+        const int result = Framegen::PollSyncFile(fd, 1000);
+        ASSERT_MSG(result >= 0, "Invalid release fence for buffer {}: {}", index, result);
+        if (result == 1) break;
         LOG_WARNING(Render_Vulkan, "AHB swapchain: release fence of buffer {} still pending", index);
     }
     close(fd);
+    buffer.release_fd = -1;
+    return true;
 }
 
 int Swapchain::ExportPresentReady() {
@@ -430,6 +479,12 @@ int Swapchain::ExportPresentReady() {
         }
         const auto idle = instance.GetDevice().waitIdle();
         ASSERT_MSG(idle == vk::Result::eSuccess, "waitIdle failed: {}", vk::to_string(idle));
+        // 失败导出没有转移 payload；设备空闲后重建，避免再次 signal 旧的 binary payload。
+        instance.GetDevice().destroySemaphore(present_ready[image_index]);
+        const vk::ExportSemaphoreCreateInfo export_info{
+            .handleTypes = vk::ExternalSemaphoreHandleTypeFlagBits::eSyncFd};
+        present_ready[image_index] = Check(instance.GetDevice().createSemaphore({.pNext = &export_info}));
+        async_present = false;
         return -1;
     }
     return fd; // -1 is possible too: the semaphore was already signaled
@@ -453,6 +508,8 @@ bool Swapchain::Present() {
         return true;
     }
     const int fence_fd = send_mode == 1 ? -1 : ExportPresentReady();
+    const bool handed = buffers[image_index].lease.HandOff(CurrentReservation(), generation);
+    ASSERT(handed);
     ++frame_counter;
     if (client.Connected()) {
         if (!client.SendFrame(generation, image_index, frame_counter, width, height, fence_fd)) {
@@ -462,6 +519,7 @@ bool Swapchain::Present() {
     } else {
         // Nobody shows it: the sync file is dropped, the buffer is free at once.
         free_queue.push_back(image_index);
+        buffers[image_index].lease.Release();
         buffers[image_index].release_fd = -1;
     }
     if (fence_fd >= 0) {

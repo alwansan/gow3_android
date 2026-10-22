@@ -133,6 +133,7 @@ private:
     Frontend::WindowSDL& window;
     Instance instance;
     HostPasses::FsrPass fsr_pass;
+    bool fsr_created = false;
     HostPasses::FsrPass::Settings fsr_settings{};
     HostPasses::PostProcessingPass::Settings pp_settings{};
     HostPasses::PostProcessingPass pp_pass;

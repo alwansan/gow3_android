@@ -12,6 +12,9 @@ import android.content.res.AssetManager
 
 enum class PatchGroup { RESOLUTION, FRAME_RATE, VIDEO, FIX, EFFECT }
 
+/** 补丁来源：内置目录（APK 资产）或启用模组携带的 patches 目录下的 xml。 */
+enum class PatchSource { BUILTIN, MOD }
+
 /**
  * One <Line> of a patch: the site it patches (a signature plus an offset inside the match, or the
  * reference build's address) and the bytes to write there. [target] names a <Target> the line writes
@@ -46,6 +49,7 @@ data class GamePatch(
     val appElf: String,
     val lines: List<PatchLine>,
     val targets: List<PatchTarget>,
+    val source: PatchSource = PatchSource.BUILTIN,
 ) {
     val resolution: String? get() = name.takeIf { it.startsWith("Resolution Patch - ") }?.removePrefix("Resolution Patch - ")
     /** 补丁页/设置页显示名：统一「宽×高」实际像素尺寸（含 × 排版），档位内部值（480p/1280x800…）
@@ -179,7 +183,27 @@ data class PatchCatalog(val titleId: String, val appVersion: String, val patches
         // The caller opens the asset, so a missing one surfaces as an IOException to Java callers.
         @JvmStatic
         @Throws(IOException::class)
-        fun load(game: File?, update: File?, open: (String) -> InputStream): PatchCatalog {
+        fun load(game: File?, update: File?, open: (String) -> InputStream): PatchCatalog =
+            load(game, update, null, null, false, open)
+
+        /**
+         * 供 Java 调用方使用（GameActivity）：asset 在这里打开，受检 IOException 由 load 自己声明。
+         * Java 的 lambda（Function1.invoke 没有 throws）不允许穿出受检异常，所以不能把
+         * AssetManager.open 直接交给调用方包成 lambda。
+         */
+        @JvmStatic
+        @Throws(IOException::class)
+        fun load(game: File?, update: File?, assets: AssetManager): PatchCatalog =
+            load(game, update, null, null, false) { assets.open(it) }
+
+        /**
+         * 带模组输入的加载：启用模组（总开关开启）携带的 patches 目录下的 xml 解析为 `source=MOD`
+         * 的补丁，与内置目录合并；同名补丁由模组项替换内置项。总开关关闭时不并入。只读模组文件，不修改它们。
+         */
+        @JvmStatic
+        @Throws(IOException::class)
+        fun load(game: File?, update: File?, modsDir: File?, modsConfig: File?, modsEnabled: Boolean,
+                 open: (String) -> InputStream): PatchCatalog {
             if (game == null) throw PatchCatalogException(CatalogProblem.NO_GAME)
             if (!File(game, "eboot.bin").isFile) throw PatchCatalogException(CatalogProblem.INVALID_GAME)
             val base = GameSfo.read(File(game, "sce_sys/param.sfo")) ?: throw PatchCatalogException(CatalogProblem.INVALID_GAME)
@@ -194,18 +218,27 @@ data class PatchCatalog(val titleId: String, val appVersion: String, val patches
             val version = effective["APP_VER"] ?: throw PatchCatalogException(CatalogProblem.INVALID_GAME)
             if (title !in versions) throw PatchCatalogException(CatalogProblem.UNSUPPORTED)
             if (version !in versions.getValue(title)) throw PatchCatalogException(CatalogProblem.VERSION)
-            return open("God_of_War_III_Remastered_$title.xml").use { parse(it, title, version) }
+            val catalog = open("God_of_War_III_Remastered_$title.xml").use { parse(it, title, version) }
+            if (!modsEnabled || modsDir == null || !modsDir.isDirectory) return catalog
+            val modPatches = ArrayList<GamePatch>()
+            for (file in ModFileResolver.enabledPatchFiles(modsDir, modsConfig, true, update ?: game)) {
+                try {
+                    file.inputStream().use { modPatches.addAll(parseModPatches(it, title, version)) }
+                } catch (error: Exception) {
+                    // 损坏的模组补丁跳过，不阻断内置目录。
+                }
+            }
+            if (modPatches.isEmpty()) return catalog
+            return catalog.copy(patches = mergeModPatches(catalog.patches, modPatches))
         }
 
-        /**
-         * 供 Java 调用方使用（GameActivity）：asset 在这里打开，受检 IOException 由 load 自己声明。
-         * Java 的 lambda（Function1.invoke 没有 throws）不允许穿出受检异常，所以不能把
-         * AssetManager.open 直接交给调用方包成 lambda。
-         */
-        @JvmStatic
-        @Throws(IOException::class)
-        fun load(game: File?, update: File?, assets: AssetManager): PatchCatalog =
-            load(game, update) { assets.open(it) }
+        /** 内置目录与模组补丁合并：后置的模组项按同名替换内置项；顺序保持内置在前、模组按加载顺序追加。 */
+        fun mergeModPatches(builtin: List<GamePatch>, mod: List<GamePatch>): List<GamePatch> {
+            val byName = LinkedHashMap<String, GamePatch>()
+            for (patch in builtin) byName[patch.name] = patch
+            for (patch in mod) byName[patch.name] = patch
+            return byName.values.toList()
+        }
 
         private fun readLines(meta: Element): List<PatchLine> {
             val nodes = meta.getElementsByTagName("Line")
@@ -256,6 +289,30 @@ data class PatchCatalog(val titleId: String, val appVersion: String, val patches
                 }
             require(patches.isNotEmpty() && patches.map { it.name }.distinct().size == patches.size)
             return PatchCatalog(title, version, patches)
+        }
+
+        /**
+         * 解析一个模组补丁文件（设备侧 patches 目录下的 xml）：根为 `<Patch>`，内含多个 `<Metadata>`；
+         * `<TitleID><ID>...</ID></TitleID>` 声明适用 Title（缺失时不限制）。只返回当前 title/version
+         * 的补丁，标记 `source=MOD`。默认不启用（与第三方补丁一致，玩家在补丁页开关）。
+         */
+        private fun parseModPatches(input: InputStream, title: String, version: String): List<GamePatch> {
+            val root = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(input).documentElement
+            val titles = root.getElementsByTagName("TitleID")
+            val allowed = if (titles.length == 0) null else {
+                val ids = (titles.item(0) as Element).getElementsByTagName("ID")
+                (0 until ids.length).map { ids.item(it).textContent.trim() }.toSet()
+            }
+            val metas = root.getElementsByTagName("Metadata")
+            return (0 until metas.length).map { metas.item(it) as Element }
+                .filter { it.getAttribute("AppVer") == version && it.getAttribute("AppElf") == "eboot.bin" }
+                .filter { allowed == null || title in allowed }
+                .map { meta ->
+                    GamePatch(meta.getAttribute("Name"), meta.getAttribute("Note"), meta.getAttribute("Author"),
+                        meta.getAttribute("Validation"), meta.getAttribute("isEnabled").toBoolean(),
+                        meta.getAttribute("AppVer"), meta.getAttribute("AppElf").ifEmpty { "eboot.bin" },
+                        readLines(meta), readTargets(meta), PatchSource.MOD)
+                }
         }
     }
 }

@@ -16,7 +16,6 @@ public final class DrawerTabSpec {
 
     public static DrawerTabSpec of(DrawerTab tab) {
         switch (tab) {
-            case GAME: return new DrawerTabSpec(R.string.drawer_tab_game, R.drawable.ic_play);
             case GRAPHICS: return new DrawerTabSpec(R.string.drawer_tab_graphics, R.drawable.ic_tune);
             case CHEATS: return new DrawerTabSpec(R.string.drawer_tab_cheats, R.drawable.ic_cheats);
             case CONTROLS: return new DrawerTabSpec(R.string.drawer_tab_controls, R.drawable.ic_gamepad);

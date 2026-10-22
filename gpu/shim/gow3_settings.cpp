@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "gow3_settings.h"
+#include "gow3_mobile_policy.h"
 #include "gow3_orbs.h"
 #include "gow3_graphics.h"
 
@@ -171,10 +172,18 @@ Values& Get() {
 }
 
 void Load() {
+    Get().frames_queued = Gow3Mobile::FramesQueued(Gow3Mobile::Android());
     // 游戏进程的 stdout 经 app 侧管道落盘（android-game.log）：默认块缓冲会让排障用的
     // 少量 printf 迟迟不出现。改为行缓冲，所有诊断行即时可见。
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
     auto& v = Get();
+    if (Gow3Mobile::Android()) {
+        // 键缺省时与 Android UI 一致；显式配置仍由后续解析处理，旧后处理另有入口门控。
+        v.upscaler = UpscalerOff;
+        v.sharpen = false;
+        v.fsr1 = false;
+        v.rcas = false;
+    }
     if (FILE* file = std::fopen(Path(), "r")) {
         char line[256];
         while (std::fgets(line, sizeof(line), file)) {

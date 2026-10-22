@@ -101,6 +101,18 @@ inline bool FsrPassRuns(bool fsr1, bool rcas, int in_w, int in_h, int out_w, int
     return (fsr1 && upscale) || (rcas && same);
 }
 
+struct LegacyFsrOptions {
+    bool fsr1{};
+    bool rcas{};
+};
+
+// Android 的旧后处理不得绕过启动器开关；桌面保留独立的 FSR1/RCAS 控制。
+constexpr LegacyFsrOptions ResolveLegacyFsrOptions(bool android, bool upscaler_enabled,
+                                                  bool sharpen_enabled, bool fsr1, bool rcas) {
+    const bool allowed = !android || upscaler_enabled;
+    return {allowed && fsr1, allowed && rcas && (!android || sharpen_enabled)};
+}
+
 /// What the present limit really allows: the engine ceiling caps it.
 inline int EffectiveFps(int limit, int engine_fps) {
     return limit == 0 || limit > engine_fps ? engine_fps : limit;

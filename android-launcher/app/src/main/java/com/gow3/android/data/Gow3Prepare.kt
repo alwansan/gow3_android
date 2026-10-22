@@ -69,7 +69,7 @@ object Gow3Prepare {
      */
     private external fun nativeBootLinked(gameDir: String, outDir: String, moduleFiles: Array<String>): Boolean
 
-    /** The result of one preparation, as the patch page shows it. */
+    /** 成功结果的 gameView 交给调用方持有，必须在对应进程退出后关闭。 */
     data class Result(
         val ok: Boolean,
         val reason: String,
@@ -80,6 +80,8 @@ object Gow3Prepare {
         val renderResolution: String,
         val writeCount: Int,
         val message: String,
+        val gameView: GameUpdateView? = null,
+        val modView: ModGameView? = null,
     )
 
     /**
@@ -99,6 +101,56 @@ object Gow3Prepare {
         context: Context,
         gameDir: File,
         updateDir: File?,
+        catalog: PatchCatalog,
+        ini: Map<String, String>,
+    ): Result {
+        val parent = File(File(context.filesDir, "gow3port"), "data")
+        val view = GameUpdateView.create(gameDir, updateDir, parent)
+        var modView: ModGameView? = null
+        try {
+            // 启用模组（总开关开启）叠加在「基础 + 更新」视图之上，运行时实际启动的目录是最终视图。
+            modView = ModGameView.create(
+                view,
+                File(Gow3Data.root(context), "mods"),
+                File(Gow3Data.root(context), "mods.json"),
+                ini["load_mods"] != "0",
+                parent,
+            )
+            val effective = modView?.directory ?: view.directory
+            val identity = GameSfo.read(File(effective, "sce_sys/param.sfo"))
+            if (identity?.get("TITLE_ID") != catalog.titleId || identity?.get("APP_VER") != catalog.appVersion) {
+                throw java.io.IOException("The effective game identity changed; select the game/update again")
+            }
+            // 补丁、链接模块、SFO 与运行时 app0 必须来自同一份有效视图。
+            val result = prepareEffective(context, effective, catalog, ini)
+            if (result.ok) return result.copy(gameView = view, modView = modView)
+            closeQuietly(modView)
+            view.close()
+            return result
+        } catch (error: Exception) {
+            try {
+                closeQuietly(modView)
+                view.close()
+            } catch (cleanup: java.io.IOException) {
+                error.addSuppressed(cleanup)
+            }
+            throw error
+        }
+    }
+
+    private fun closeQuietly(modView: ModGameView?) {
+        if (modView != null) {
+            try {
+                modView.close()
+            } catch (ignored: java.io.IOException) {
+                // 清理失败不影响准备结果上报。
+            }
+        }
+    }
+
+    private fun prepareEffective(
+        context: Context,
+        gameDir: File,
         catalog: PatchCatalog,
         ini: Map<String, String>,
     ): Result {
@@ -142,6 +194,7 @@ object Gow3Prepare {
         }
 
         val ebootSha = sha256(eboot)
+        Log.i(TAG, "effective game: ${catalog.titleId} ${catalog.appVersion}; eboot=$ebootSha")
         // The native half does not know the identity (that is the launcher's reading of param.sfo);
         // fill it in so the report matches what scripts/patches.py writes.
         status.put("title_id", catalog.titleId)
@@ -163,16 +216,15 @@ object Gow3Prepare {
         // G3CONT01: the SKU is a probe setting (full=3) and the four USER_DEFINED_PARAM values come
         // from the game's param.sfo - the same inputs scripts/content_profile.py uses. The upgrade
         // overlay's param.sfo is the effective one, which is what the catalogue read too.
-        val sfo = GameSfo.read(
-            File(if (updateDir != null && updateDir.isDirectory) updateDir else gameDir, "sce_sys/param.sfo")
-        ) ?: emptyMap()
+        val sfo = GameSfo.read(File(gameDir, "sce_sys/param.sfo")) ?: emptyMap()
         val userParams = IntArray(4) { index ->
             sfo["USER_DEFINED_PARAM_${index + 1}"]?.toLongOrNull()?.let {
                 if (it in 0..0xffffffffL) it.toInt() else 0
             } ?: 0
         }
         if (!nativeContentProfile(outDir.absolutePath, 3, userParams)) {
-            Log.w(TAG, "cannot write content.bin into ${outDir.path}")
+            return Result(false, "prepare-failed", applied, skipped, dmem, vblank, resolution, writes,
+                "cannot write content.bin into ${outDir.path}")
         }
         // The boot image itself: what probe.c actually executes. Without it run-bionic.sh has
         // nothing to start, which is why this used to need scripts/prepare.py on a host.
@@ -182,7 +234,9 @@ object Gow3Prepare {
             ?.filter { it.isNotEmpty() }
             ?: DEFAULT_LINKED_MODULES)
         try {
-            nativeBootLinked(gameDir.absolutePath, outDir.absolutePath, modules.toTypedArray())
+            if (!nativeBootLinked(gameDir.absolutePath, outDir.absolutePath, modules.toTypedArray())) {
+                throw java.io.IOException("Cannot link the effective game image")
+            }
         } catch (error: Exception) {
             Log.e(TAG, "boot image linking failed", error)
             return Result(false, "prepare-failed", emptyList(), emptyMap(), BASE_DMEM_MB, 60, "native", 0,

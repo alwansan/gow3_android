@@ -269,6 +269,10 @@ bool Lsfg::Initialize() {
                 diagnostics);
     std::fflush(stdout);
     LogPrecision();
+    std::printf("LSFG input sync: %s (%s)\n",
+                Framegen::UseAsync(input_sync, false, sync_host || !chain) ? "async" : "complete",
+                input_sync == Framegen::SyncMode::Async && !sync_host && chain
+                    ? "explicit diagnostic override" : "conservative or forced host sync");
 
     // The game device's synchronization objects.
     const vk::Device device = instance.GetDevice();
@@ -513,7 +517,28 @@ vk::Semaphore Lsfg::Reuse(RingSemaphore& entry) {
 void Lsfg::OutputSubmitted(u32 index, u64 tick) {
     if (index < output_wait.size()) {
         output_wait[index][output_slot[index]].tick = tick;
+        output_pending[index] = false;
+        outputs[index].wait = vk::Semaphore{};
+        outputs[index].done = vk::Fence{};
     }
+}
+
+void Lsfg::PrepareOutput(u32 index) {
+    if (outputs[index].done) {
+        Check(instance.GetDevice().resetFences(outputs[index].done));
+    }
+}
+
+void Lsfg::DiscardOutput(Scheduler& scheduler, u32 index) {
+    if (!output_pending[index]) return;
+    // 不读取像素也必须消费已导入的 binary payload，才能安全复用环槽。
+    SubmitInfo info{};
+    info.AddWait(outputs[index].wait);
+    PrepareOutput(index);
+    info.AddSignal(outputs[index].done);
+    const u64 tick = scheduler.CurrentTick();
+    scheduler.Flush(info);
+    OutputSubmitted(index, tick);
 }
 
 bool Lsfg::ImportSyncFile(vk::Semaphore semaphore, int fd) {
@@ -531,7 +556,7 @@ bool Lsfg::ImportSyncFile(vk::Semaphore semaphore, int fd) {
 }
 
 int Lsfg::ProcessFrame(Scheduler& scheduler, vk::Image image, u32 width, u32 height, vk::Semaphore ready,
-                       u64 ready_tick, u64 latency_id) {
+                       u64 ready_tick, bool generate, u64 latency_id) {
     if (failed) {
         return -1;
     }
@@ -550,7 +575,7 @@ int Lsfg::ProcessFrame(Scheduler& scheduler, vk::Image image, u32 width, u32 hei
     }
     const vk::Device device = instance.GetDevice();
     Context& ctx = *context;
-    const u32 count = ctx.frame < WarmupFrames ? 0 : multiplier - 1;
+    const u32 count = Framegen::GenerationCount(multiplier, ctx.frame < WarmupFrames, generate);
 
     scheduler_used = &scheduler;
     const bool chained = Chained();
@@ -656,15 +681,17 @@ int Lsfg::ProcessFrame(Scheduler& scheduler, vk::Image image, u32 width, u32 hei
         if (!chained) {
             info.AddSignal(copy_done);
         }
+        const u64 copy_tick = scheduler.CurrentTick();
         scheduler.Flush(info);
-        const u64 copy_tick = scheduler.CurrentTick() - 1;
         input_entry.tick = copy_tick;
         if (batch_entry) {
             batch_entry->tick = copy_tick;
         }
-        // The sync file of the semaphore can only be exported once its signal is submitted (the
-        // submission may go out from a recording thread).
-        scheduler.WaitSubmitted(); // gow3 调度器：等当前队列全部提交（含本拷贝），语义同 BB 的 WaitSubmitted(tick)
+        // Flush 在本线程完成提交；只有兼容策略才额外等 GPU，不改其他 WaitSubmitted 调用语义。
+        if (!Framegen::UseAsync(input_sync, false, sync_host || !chain)) {
+            scheduler.Wait(copy_tick);
+            ++stats->host_waits;
+        }
     }
     batch_pending = -1;
 
@@ -681,6 +708,12 @@ int Lsfg::ProcessFrame(Scheduler& scheduler, vk::Image image, u32 width, u32 hei
             std::printf("LSFG: exporting a sync file failed (%s): waiting on the CPU from now on\n",
                         vk::to_string(result).c_str());
             sync_host = true;
+            scheduler.Wait(input_entry.tick);
+            // 未成功导出时旧 payload 未转移，先等完成再重建。
+            device.destroySemaphore(input_entry.semaphore);
+            const vk::ExportSemaphoreCreateInfo export_info{
+                .handleTypes = vk::ExternalSemaphoreHandleTypeFlagBits::eSyncFd};
+            input_entry.semaphore = Check(device.createSemaphore({.pNext = &export_info}));
         }
     }
     if (sync_host) {
@@ -743,12 +776,20 @@ int Lsfg::ProcessFrame(Scheduler& scheduler, vk::Image image, u32 width, u32 hei
             return -1;
         }
         ++stats->host_waits;
+        if (batch_pending >= 0) {
+            auto& pending = batch_wait[batch_pending];
+            SubmitInfo info{};
+            info.AddWait(pending.semaphore);
+            pending.tick = scheduler.CurrentTick();
+            scheduler.Flush(info);
+        }
         batch_pending = -1;
     }
     for (u32 i = 0; i < count; ++i) {
         // Chained: no fence; what reads the output is ordered before the next copy (vk_lsfg.h).
-        outputs[i] = {ctx.output[i].image, output_waits[i] && !host_wait ? output_semaphores[i] : vk::Semaphore{},
+        outputs[i] = {ctx.output[i].image, output_waits[i] ? output_semaphores[i] : vk::Semaphore{},
                       chained ? vk::Fence{} : output_done[i]};
+        output_pending[i] = true;
     }
 
     // Statistics.

@@ -14,14 +14,14 @@
 // 节拍由 app 决定：GOW3_VSYNC=1（gow3port.ini vsync=1；HELLO 的 GOW3_PRESENT_FLAG_FIFO）
 // 时每帧至少显示一个刷新周期、按序，并扣住未显示帧的 RELEASE，于是 AcquireNextImage 会阻塞，
 // 游戏最多以刷新率运行；否则最新帧获胜、其余被跳过。两种模式本类都只等 RELEASE，与模式无关。
-// 本移植去掉了 BB 的 Lossless Scaling（LSFG）帧生成耦合：缓冲数固定 3，presentation 模式
-// 只由 GOW3_VSYNC 决定。
+// 直通默认三个缓冲；游戏进程内帧生成开启时按倍率扩展并强制 FIFO。
 #pragma once
 
 #ifdef __ANDROID__
 #include <deque>
 #include <vector>
 #include "gow3_present_client.h"
+#include "video_core/renderer_vulkan/framegen_policy.h"
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
@@ -52,6 +52,11 @@ public:
 
     /// Takes the next free buffer; false when the buffers must be recreated (0x0 size).
     bool AcquireNextImage();
+    using Reservation = Framegen::Reservation;
+    bool TryReserve(Reservation& token);
+    Reservation CurrentReservation() const;
+    bool Select(Reservation token);
+    void Cancel(Reservation token);
     /// Hands the current buffer to the app.
     bool Present();
 
@@ -88,9 +93,8 @@ public:
     /// {src, dst} of the barrier that takes the image back from the app / gives it to the app.
     std::pair<u32, u32> AcquireQueues() const;
     std::pair<u32, u32> ReleaseQueues() const;
-    /// The presenter must have the submission with the present-ready signal queued before Present
-    /// (the sync file of a semaphore needs its signal submitted).
-    static constexpr bool NeedsSubmittedBeforePresent() { return true; }
+    /// 保守驱动等待 GPU 完成；异步路径只要求 signal 及依赖已提交。
+    bool NeedsSubmittedBeforePresent() const { return !async_present; }
 
     /// gow3: 桌面 swapchain 由 in-game 菜单的 vsync 设置驱动重建；Bionic 下节拍在 app 侧
     /// （GOW3_VSYNC），这里只保留接口兼容，不重建。
@@ -108,6 +112,7 @@ private:
         vk::ImageView view{};
         int release_fd{-1}; ///< the app's release fence of the last frame, until it is waited on
         bool acquire_imported{false}; ///< release_fd was imported into image_acquired[index]
+        Framegen::BufferLease lease;
     };
 
     void Destroy();
@@ -115,7 +120,8 @@ private:
     void HandleRelease(Gow3Present::Release& release);
     void PeerGone() const;
     int ExportPresentReady();
-    void ImportAcquire(u32 index);
+    bool ImportAcquire(u32 index, bool nonblocking = false);
+    void DrainReleases();
 
 private:
     const Instance& instance;
@@ -136,6 +142,7 @@ private:
     bool zero_extent = false;
     bool needs_recreation = true;
     bool sync_import_ok = true; ///< importing sync files as semaphores works (else poll them)
+    bool async_present = false;
 };
 
 } // namespace Vulkan
