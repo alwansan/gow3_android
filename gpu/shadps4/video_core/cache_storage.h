@@ -49,6 +49,8 @@ public:
     [[nodiscard]] bool ConcurrentReads() const;
     /// gow3: number of blobs ForEachBlob visits (the loading screen's total).
     size_t CountBlobs(BlobType type);
+    /// gow3（上游 b776be7）：`type` 的 blob 名（不含扩展名）；zip 归档时为空。
+    std::vector<std::string> ListBlobs(BlobType type);
 
 private:
     std::jthread io_worker{};

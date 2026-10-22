@@ -131,7 +131,7 @@ public:
     void ProcessDownloadImages();
     bool ResolveReadbacks(VAddr address, u64 size, bool assume_locks = true,
                           ReadbackSource source = ReadbackSource::Unknown);
-    void CancelReadbacks(VAddr address, u64 size);
+    void CancelReadbacks(VAddr address, u64 size, bool exact = false);
 
     /// Retrieves the image handle of the image with the provided attributes.
     [[nodiscard]] ImageId FindImage(ImageDesc& desc, bool exact_fmt = false);
@@ -475,6 +475,11 @@ private:
     };
     std::array<ReadbackImageStat, 16> readback_images{};
     u64 readbacks_released = 0;
+    u64 readbacks_neighbors = 0; ///< ExactReadbackWaits 放行的相邻页解析（报告用）
+    /// gow3（上游 b776be7）：stale readback 下，image 上传/释放只等真正共享字节的拷贝。
+    bool ExactReadbackWaits() const {
+        return stale_readbacks && !Gow3Toggle::Disabled(Gow3Toggle::ExactReadbackWaits);
+    }
     /// gow3（上游 b646683，轻量版）：PartialHeightViews 复用命中计数与 5 秒节流的日志，
     /// 仅在 GOW3_PERF_DIAG=1 时打印（不含上游的 CreateStat 诊断面板）。
     u64 partial_views = 0;

@@ -32,6 +32,11 @@ void UpdateTextInput(SDL_Window* window);
 void SetLoading(bool active, u32 done, u32 total);
 /// Background cache warm-up: a small corner note while the game runs; `total` 0 hides it.
 void SetBackgroundLoading(u32 done, u32 total);
+/// 磁盘着色器预读（上游 b776be7）：任意线程；读入完成后再保持 2 秒；`total` 0 隐藏。
+void SetShaderPrefetch(u32 done, u32 total);
+/// 着色器翻译计数（上游 b776be7）：GPU 线程；`pending` 仍在翻译的数量、`started` 自上次调用
+/// 新增的数量。任一在跑或结束后 2 秒内显示右下角角标。
+void NoteShaderCompiles(u32 pending, u32 started);
 
 /// True once the ImGui Vulkan backend came up. False after a failed Init: there is no ImGui
 /// context then, so nothing may call ImGui::GetIO(), and a dialog the player would have to read

@@ -4,8 +4,11 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <span>
+#include <utility>
+#include <vector>
 
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -18,6 +21,7 @@ using Key = std::vector<u8>;
 struct Binary {
     Key key;
     std::vector<u8> data;
+    u64 content = 0; ///< 版本 2 文件：`data` 的 XXH3，命名其共享文件
 };
 constexpr size_t MaxFileSize = 64 * 1024 * 1024;
 constexpr u32 MaxBinaries = 32;
@@ -29,6 +33,20 @@ std::optional<std::vector<Binary>> Decode(std::span<const u8> bytes, const Key& 
 bool Save(const std::filesystem::path& file, std::span<const u8> bytes);
 std::optional<std::vector<Binary>> Load(const std::filesystem::path& file, const Key& global,
                                         const Key& pipeline, u64 graphics_hash);
+/// gow3（上游 b776be7）：版本 2，只含 key 与内容哈希；数据在 SharedPath 文件里（StoreShared）。
+/// 驱动会复用相同 key 存不同数据，所以文件按内容命名。
+std::vector<u8> EncodeShared(const Key& global, const Key& pipeline, u64 graphics_hash,
+                             const std::vector<Binary>& binaries);
+std::filesystem::path SharedPath(const std::filesystem::path& directory, const Key& global,
+                                 const Key& binary, u64 content);
+bool StoreShared(const std::filesystem::path& file, const Key& global, const Key& pipeline,
+                 u64 graphics_hash, const std::vector<Binary>& binaries);
+/// StoreShared，或 SharedBinaries 关闭时的版本 1 文件。
+bool Store(const std::filesystem::path& file, const Key& global, const Key& pipeline,
+           u64 graphics_hash, const std::vector<Binary>& binaries);
+/// 把 `directory` 的每个版本 1 文件重写为版本 2：{文件数, 释放字节数}。
+std::pair<u64, s64> ConvertToShared(const std::filesystem::path& directory,
+                                    const std::function<bool()>& stop = {});
 } // namespace PipelineBinaryCache
 
 vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(

@@ -67,6 +67,11 @@ bool r3_down = false, l2_down = false;
 std::atomic<bool> loading{false};
 std::atomic<u32> loading_done{0}, loading_total{0};
 std::atomic<u32> background_done{0}, background_total{0};
+// 磁盘着色器预读与编译角标（上游 b776be7）：done 完成数、total 总数（0 隐藏）、until 到期毫秒。
+std::atomic<u32> prefetch_done{0}, prefetch_total{0};
+std::atomic<s64> prefetch_until{0};
+std::atomic<u32> compile_pending{0}, compile_count{0};
+std::atomic<s64> compile_until{0};
 bool dirty = false; // settings changed while open: saved on close
 int requested_tab = -1; // switch on the next frame (L1/R1, Q/E, menu opened)
 // The game's text dialog (SetTextEntry), guarded by imgui_mutex.
@@ -830,6 +835,69 @@ void BackgroundLoading() {
     ImGui::End();
 }
 
+s64 NowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+// 右下角角标从底部向上堆叠：预读、编译。与 BackgroundLoading 同一套低透明度小窗风格。
+template <typename Body>
+void CornerNote(const char* id, float& bottom, float alpha, Body&& body) {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float pad = 12.0f * base_scale;
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - pad, bottom),
+                            ImGuiCond_Always, ImVec2(1.0f, 1.0f));
+    ImGui::SetNextWindowBgAlpha(alpha);
+    ImGui::Begin(id, nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing);
+    body();
+    bottom -= ImGui::GetWindowHeight() + pad / 2;
+    ImGui::End();
+}
+
+// GOW3_SHADER_NOTES=1 打开角标；默认关（上游默认关，纯展示不影响优化本身）。
+const bool shader_notes = [] {
+    const char* env = std::getenv("GOW3_SHADER_NOTES");
+    return env && *env != '0';
+}();
+
+bool PrefetchActive() {
+    const u32 total = prefetch_total;
+    return shader_notes && total && (prefetch_done < total || prefetch_until > NowMs());
+}
+
+void ShaderPrefetchNote(float& bottom) {
+    const u32 done = prefetch_done, total = std::max(prefetch_total.load(), 1u);
+    CornerNote("##shader_prefetch", bottom, 0.35f, [&] {
+        if (done >= total) {
+            ImGui::TextDisabled("Shader cache ready (%u)", total);
+            return;
+        }
+        ImGui::TextDisabled("Reading shader cache %u%% (%u/%u)", u32(u64(done) * 100 / total), done,
+                            total);
+        ImGui::ProgressBar(float(done) / float(total),
+                           ImVec2(ImGui::GetContentRegionAvail().x, 4.0f * base_scale), "");
+    });
+}
+
+bool CompileNoteActive() {
+    return shader_notes && (compile_pending || compile_until > NowMs());
+}
+
+void ShaderCompilesNote(float& bottom) {
+    const u32 pending = compile_pending, count = compile_count;
+    CornerNote("##shader_compiles", bottom, 0.35f, [&] {
+        if (pending) {
+            ImGui::TextDisabled("Compiling shaders (%u left)", pending);
+        } else {
+            ImGui::TextDisabled("Compiled %u new shader%s", count, count == 1 ? "" : "s");
+        }
+    });
+}
+
 } // namespace
 
 namespace {
@@ -1165,6 +1233,24 @@ void SetBackgroundLoading(u32 done, u32 total) {
     background_total = total;
 }
 
+void SetShaderPrefetch(u32 done, u32 total) {
+    if (total && done >= total) {
+        prefetch_until = NowMs() + 2000;
+    }
+    prefetch_done = done;
+    prefetch_total = total;
+}
+
+void NoteShaderCompiles(u32 pending, u32 started) {
+    const s64 now = NowMs();
+    if (!compile_pending && compile_until <= now) {
+        compile_count = 0; // 新的一批
+    }
+    compile_count += started;
+    compile_pending = pending;
+    compile_until = now + 2000;
+}
+
 void SetLoading(bool active, u32 done, u32 total) {
     loading_done = done;
     loading_total = total;
@@ -1177,7 +1263,8 @@ bool Available() {
 
 bool Visible() {
     const auto& s = Gow3Settings::Get();
-    return initialized && (loading || background_total || menu_open || text_entry_active || choice_active ||
+    return initialized && (loading || background_total || PrefetchActive() || CompileNoteActive() ||
+                           menu_open || text_entry_active || choice_active ||
                            choice_retiring || s.show_fps ||
                            (s.actor_watch_supported && s.enemy_health_bar));
 }
@@ -1352,6 +1439,14 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (background_total && !loading && !menu_open) {
         BackgroundLoading();
+    }
+    float corner = ImGui::GetMainViewport()->WorkPos.y + ImGui::GetMainViewport()->WorkSize.y -
+                   12.0f * base_scale;
+    if (PrefetchActive() && !loading && !menu_open) {
+        ShaderPrefetchNote(corner);
+    }
+    if (CompileNoteActive() && !loading && !menu_open) {
+        ShaderCompilesNote(corner);
     }
     if (text_entry_active) {
         TextEntryBox();

@@ -3,8 +3,11 @@
 
 #pragma once
 
+#include <chrono>
 #include <functional>
+#include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <shared_mutex>
 #include <variant>
 #include <boost/container/static_vector.hpp>
@@ -249,6 +252,38 @@ private:
     PipelineSelection sel{}; ///< GPU thread selection state
     ComputePipelineKey compute_key{};
     u32 num_new_pipelines{}; // new pipelines added to the cache since the game start
+    /// gow3（上游 b776be7，Gow3Toggle::DiskShaders）：on-demand 启动时，program_cache 缺失的
+    /// 程序先按它保存的 permutation 索引从 store 读回，而不是重新翻译（进场景弹顿）再重写
+    /// （防病毒逐文件扫）。
+    bool disk_shaders = false;
+    bool disk_store_untrusted = false; ///< 该位运行期被关掉：标记重置为 0
+    std::unordered_map<u64, std::vector<u32>> disk_permutations; ///< pgm hash -> 已存索引
+    std::unordered_set<std::string> disk_pipeline_keys;          ///< 已存的 "g_0x..."/"c_0x..."
+    std::unordered_set<VkShaderModule> disk_modules_unused;      ///< 已读、还没用上
+    struct DiskShaderStats {
+        u64 programs, permutations, matched, compiled, keys_skipped, keys_written, load_ns;
+    } disk_stats{}, disk_reported{};
+    std::chrono::steady_clock::time_point disk_report{};
+    [[nodiscard]] bool DiskShadersActive() const;
+    void IndexDiskShaders();
+    struct DiskPrefetch;
+    DiskPrefetch* disk_prefetch = nullptr; ///< 本类持有；由 StopDiskPrefetch 删除
+    void StartDiskPrefetch();
+    void StopDiskPrefetch();
+    struct BinaryConversion;
+    BinaryConversion* binary_conversion = nullptr; ///< 本类持有；由 StopBinaryConversion 删除
+    void StartBinaryConversion();
+    void StopBinaryConversion();
+    bool LoadDiskProgram(u64 hash);
+    /// 新 permutation 的索引：store 留下的空槽，否则下一个。
+    [[nodiscard]] size_t NewPermutationIndex(const Program& program) const;
+    /// 该 pipeline key 已在 store 时返回 false（没有可写内容）。
+    bool NewPipelineKey(const std::string& name);
+    void ReportDiskShaders();
+    /// gow3（上游 b776be7）：已开始的翻译（异步 + GPU 线程），给角标用。
+    u64 compiles_started = 0, compiles_reported = 0;
+    u32 pending_reported = 0;
+    void ReportCompiles();
 
     // Only if Config::collectShadersForDebug()
     tsl::robin_map<vk::ShaderModule,

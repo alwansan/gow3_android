@@ -105,6 +105,12 @@ void TextureCache::RetireReadbacks() {
 bool TextureCache::ResolveReadbacks(VAddr address, u64 size, bool assume_locks,
                                     ReadbackSource source) {
     if (!deferred_readbacks || !has_pending_readbacks.load(std::memory_order_acquire)) return false;
+    // gow3（上游 b776be7）：image 上传读取、释放丢弃的正是该 image 的字节。只共享一页的相邻
+    // image 的拷贝会在别的字节上稍后发布。只在 stale readback 下：否则待决页受读保护，
+    // 拷贝线程会缺页。
+    const bool exact = ExactReadbackWaits() &&
+        (source == ReadbackSource::ImageRefresh || source == ReadbackSource::BufferForImage ||
+         source == ReadbackSource::ImageFree);
     {
         std::scoped_lock lock{readback_mutex};
         // Stale mode, byte rule: God of War III writes every frame to the page that holds a
@@ -114,9 +120,12 @@ bool TextureCache::ResolveReadbacks(VAddr address, u64 size, bool assume_locks,
             readbacks_released += pending_readbacks.ReleaseOutside(address, size, 64_KB,
                 [this](auto& entry) { WatchReadback<false>(entry.address, entry.size); });
         }
-        if (!pending_readbacks.RequiredTick(address, size)) return false;
+        if (!pending_readbacks.RequiredTick(address, size, exact)) {
+            if (exact && pending_readbacks.RequiredTick(address, size)) ++readbacks_neighbors;
+            return false;
+        }
     }
-    const auto resolve = [this, address, size, source] {
+    const auto resolve = [this, address, size, source, exact] {
         const bool diag = Vulkan::WaitDiagnostics::Enabled();
         std::scoped_lock lock{readback_mutex};
         bool waited = false;
@@ -130,7 +139,7 @@ bool TextureCache::ResolveReadbacks(VAddr address, u64 size, bool assume_locks,
             }
         }
         Gow3Stats::Timer readback_timer{Gow3Stats::t_readback_wait};
-        if (const u64 tick = pending_readbacks.RequiredTick(address, size)) {
+        if (const u64 tick = pending_readbacks.RequiredTick(address, size, exact)) {
             ++readbacks_waited;
             waited = !scheduler.IsFree(tick);
             const auto start = diag ? std::chrono::steady_clock::now()
@@ -149,13 +158,13 @@ bool TextureCache::ResolveReadbacks(VAddr address, u64 size, bool assume_locks,
     return true;
 }
 
-void TextureCache::CancelReadbacks(VAddr address, u64 size) {
+void TextureCache::CancelReadbacks(VAddr address, u64 size, bool exact) {
     if (!deferred_readbacks) return;
     std::scoped_lock lock{readback_mutex};
     pending_readbacks.Cancel(address, size, [this](auto& entry) {
         if (entry.watched) WatchReadback<false>(entry.address, entry.size);
         ++readbacks_canceled;
-    });
+    }, exact);
 }
 
 // gow3（上游 b646683，轻量版）：GOW3_PERF_DIAG=1 时每 5 秒打印一次 partial height views
@@ -257,7 +266,10 @@ void TextureCache::ProcessDownloadImages() {
                 if (stale_readbacks) {
                     std::printf("Readback byte rule: %llu CPU writes went on without waiting\n",
                                 static_cast<unsigned long long>(readbacks_released));
-                    readbacks_released = 0;
+                    std::printf("Readback exact waits: %llu image uploads/frees skipped a copy "
+                                "on a shared page\n",
+                                static_cast<unsigned long long>(readbacks_neighbors));
+                    readbacks_released = readbacks_neighbors = 0;
                 }
                 std::ranges::sort(readback_images, std::greater{}, &ReadbackImageStat::copies);
                 for (u32 i = 0; i < 4 && readback_images[i].copies; ++i) {
@@ -1667,7 +1679,9 @@ void TextureCache::TouchImage(const Image& image) {
 
 void TextureCache::DeleteImage(ImageId image_id) {
     Image& image = slot_images[image_id];
-    CancelReadbacks(image.info.guest_address, image.info.guest_size);
+    // gow3（上游 b776be7）：只取消该 image 的字节。FreeImage 已解析自己的拷贝；ExactReadbackWaits
+    // 下，只共享一页的相邻 image 的拷贝仍在待决、必须到达 RAM。
+    CancelReadbacks(image.info.guest_address, image.info.guest_size, true);
     ASSERT_MSG(!image.IsTracked(), "Image was not untracked");
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered), "Image was not unregistered");
 

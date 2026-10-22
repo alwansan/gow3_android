@@ -258,6 +258,22 @@ size_t DataBase::CountBlobs(BlobType type) {
     return count;
 }
 
+// gow3（上游 b776be7）：返回 `type` 的 blob 名（不含扩展名）；zip 归档时为空。
+std::vector<std::string> DataBase::ListBlobs(BlobType type) {
+    std::vector<std::string> names;
+    if (!opened || EmulatorSettings.IsPipelineCacheArchived()) {
+        return names;
+    }
+    const auto ext = "." + GetBlobFileExtension(type);
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator{cache_path, error}) {
+        if (entry.path().extension() == ext) {
+            names.push_back(entry.path().stem().string());
+        }
+    }
+    return names;
+}
+
 bool DataBase::ConcurrentReads() const {
     return !EmulatorSettings.IsPipelineCacheArchived();
 }

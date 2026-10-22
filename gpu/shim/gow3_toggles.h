@@ -73,6 +73,15 @@ enum : std::uint64_t {
     /// 直接复用更高缓存的镜像，而不是新建并上传（texture_cache.cpp）。GOW3_PARTIAL_HEIGHT_VIEWS=0
     /// 可在启动时关闭，运行期仍可用 toggle 文件做 A/B。
     PartialHeightViews = 1ull << 58,
+    // 上游 b776be7：stale readback 模式下，image 上传/释放只等待真正共享字节的待决拷贝，
+    // 不再仅因共享 4KB 页而整页等待（texture_cache.cpp）。
+    ExactReadbackWaits = 1ull << 59,
+    // 上游 b776be7：on-demand 启动优先从 store 按已存 permutation 读回程序而不是重新翻译，
+    // 已保存的 pipeline key 不再重复写回（vk_pipeline_cache.cpp）。
+    DiskShaders = 1ull << 60,
+    // 上游 b776be7：pipeline 二进制按内容去重存入 shared/，管线文件只保留 key 与内容哈希
+    // （vk_pipeline_serialization.cpp）。
+    SharedBinaries = 1ull << 61,
     // Bits 20-29 are used as raw debug toggles by the camera/object motion and the upscaler.
 };
 inline bool Disabled(std::uint64_t bit) {
