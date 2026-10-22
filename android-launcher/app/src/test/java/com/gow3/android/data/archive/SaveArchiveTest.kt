@@ -18,6 +18,8 @@ class SaveArchiveTest {
         /** 真实设备上游戏 `param.sfo` 的 TITLE_ID（Android 版 dump 是 CUSA01740）。 */
         private const val TITLE = "CUSA01740"
         private const val OTHER_TITLE = "CUSA01623"
+        /** 与 [TITLE] 互相兼容的另一个区域代号（spec：CUSA01715 ↔ CUSA01740 可互导）。 */
+        private const val COMPATIBLE_TITLE = "CUSA01715"
     }
 
     private fun tempDir(): File {
@@ -97,13 +99,69 @@ class SaveArchiveTest {
     }
 
     @Test
-    fun `validate rejects a title that differs from the current game`() {
-        // 这台设备的真实代号是 CUSA01740；带另一个区域代号（例如 PC dump 的 CUSA01623）的归档
-        // 不能被导入 —— 运行时不会去读那个目录。拒绝时须报出推导出的期望代号。
+    fun `validate accepts a compatible region title and reports it`() {
+        // CUSA01715（兼容集合内）的归档在期望 CUSA01740 时必须通过，且 check 报告实际代号。
+        val bytes = zipBytes(listOf("savedata/1/$COMPATIBLE_TITLE/AUTOSAVE/data.bin" to "x"))
+        val check = SaveArchive.check(ByteArrayInputStream(bytes), TITLE)
+        assertNull(check.problem)
+        assertEquals(COMPATIBLE_TITLE, check.title)
+    }
+
+    @Test
+    fun `validate rejects a title outside the compatible set`() {
+        // 完全未知的代号（不在兼容集合）仍然拒绝，报出期望代号。
         val bytes = zipBytes(listOf("savedata/1/$OTHER_TITLE/AUTOSAVE/data.bin" to "x"))
-        val reason = SaveArchive.validate(ByteArrayInputStream(bytes), TITLE)
-        assertTrue(reason is SaveArchiveProblem.UnsupportedTitle)
-        assertEquals(TITLE, (reason as SaveArchiveProblem.UnsupportedTitle).expected)
+        val check = SaveArchive.check(ByteArrayInputStream(bytes), TITLE)
+        assertTrue(check.problem is SaveArchiveProblem.UnsupportedTitle)
+        assertEquals(TITLE, (check.problem as SaveArchiveProblem.UnsupportedTitle).expected)
+        assertNull(check.title)
+    }
+
+    @Test
+    fun `validate rejects an archive mixing two region titles`() {
+        val bytes = zipBytes(
+            listOf(
+                "savedata/1/$TITLE/AUTOSAVE/data.bin" to "x",
+                "savedata/1/$COMPATIBLE_TITLE/AUTOSAVE/data.bin" to "y",
+            ),
+        )
+        assertNotNull(SaveArchive.check(ByteArrayInputStream(bytes), TITLE).problem)
+    }
+
+    @Test
+    fun `extract rewrites a compatible region title to the target`() {
+        val dir = tempDir()
+        val bytes = zipBytes(
+            listOf(
+                "savedata/1/$COMPATIBLE_TITLE/AUTOSAVE/data.bin" to "x",
+                "savedata/1/$COMPATIBLE_TITLE/AUTOSAVE.sce_sys/param.bin" to "p",
+                "savedata/1/$COMPATIBLE_TITLE.memory/memory.dat" to "m",
+            ),
+        )
+        val staging = File(dir, "savedata.restoring").apply { mkdirs() }
+        SaveArchive.extract(ByteArrayInputStream(bytes), staging, TITLE)
+        assertTrue(File(staging, "1/$TITLE/AUTOSAVE/data.bin").isFile)
+        assertTrue(File(staging, "1/$TITLE/AUTOSAVE.sce_sys/param.bin").isFile)
+        assertTrue(File(staging, "1/$TITLE.memory/memory.dat").isFile)
+        assertFalse(File(staging, "1/$COMPATIBLE_TITLE").exists())
+    }
+
+    @Test
+    fun `extract keeps the title unchanged when it already matches`() {
+        val dir = tempDir()
+        val bytes = zipBytes(listOf("savedata/1/$TITLE/AUTOSAVE/data.bin" to "x"))
+        val staging = File(dir, "savedata.restoring").apply { mkdirs() }
+        SaveArchive.extract(ByteArrayInputStream(bytes), staging, TITLE)
+        assertTrue(File(staging, "1/$TITLE/AUTOSAVE/data.bin").isFile)
+    }
+
+    @Test
+    fun `extract keeps the original title when no target is given`() {
+        val dir = tempDir()
+        val bytes = zipBytes(listOf("savedata/1/$COMPATIBLE_TITLE/AUTOSAVE/data.bin" to "x"))
+        val staging = File(dir, "savedata.restoring").apply { mkdirs() }
+        SaveArchive.extract(ByteArrayInputStream(bytes), staging)
+        assertTrue(File(staging, "1/$COMPATIBLE_TITLE/AUTOSAVE/data.bin").isFile)
     }
 
     @Test

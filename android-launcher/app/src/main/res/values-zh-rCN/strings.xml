@@ -286,6 +286,7 @@
     <string name="save_export">导出存档</string>
     <string name="save_import">导入存档</string>
     <string name="save_import_footer">导入会替换当前存档，但已有存档会先备份到应用私有目录内。</string>
+    <string name="save_import_cross_region">可导入 CUSA01715 与 CUSA01740 版本的存档，并会自动转换为当前版本。</string>
 
     <!-- 日志卡片 -->
     <string name="log_runtime_logs">运行时日志</string>
@@ -362,6 +363,8 @@
     <string name="save_read_failed">无法读取所选文件。</string>
     <string name="save_imported_with_backup_fmt">存档导入成功，导入前的存档已备份到 %1$s。</string>
     <string name="save_imported">存档导入成功。</string>
+    <string name="save_imported_remapped_fmt">存档已从 %1$s 导入并转换为 %2$s。</string>
+    <string name="save_imported_remapped_with_backup_fmt">存档已从 %1$s 导入并转换为 %2$s，导入前的存档已备份到 %3$s。</string>
     <string name="save_import_failed_fmt">存档导入失败：%1$s</string>
     <string name="save_archive_not_zip">所选文件不是有效的 zip 归档</string>
     <string name="save_archive_no_content">归档中没有可导入的存档内容</string>

@@ -303,6 +303,7 @@
     <string name="save_export">EXPORT SAVE</string>
     <string name="save_import">IMPORT SAVE</string>
     <string name="save_import_footer">Importing replaces the current saves, but the existing ones are backed up first into the app\'s private folder.</string>
+    <string name="save_import_cross_region">Saves from the CUSA01715 and CUSA01740 releases can be imported and are converted automatically.</string>
 
     <!-- 日志卡片 -->
     <string name="log_runtime_logs">RUNTIME LOGS</string>
@@ -379,6 +380,8 @@
     <string name="save_read_failed">Could not read the selected file.</string>
     <string name="save_imported_with_backup_fmt">Saves imported successfully; the previous saves were backed up to %1$s.</string>
     <string name="save_imported">Saves imported successfully.</string>
+    <string name="save_imported_remapped_fmt">Saves imported from %1$s and converted to %2$s.</string>
+    <string name="save_imported_remapped_with_backup_fmt">Saves imported from %1$s and converted to %2$s; the previous saves were backed up to %3$s.</string>
     <string name="save_import_failed_fmt">Save import failed: %1$s</string>
     <string name="save_archive_not_zip">The selected file is not a valid zip archive.</string>
     <string name="save_archive_no_content">The archive contains no saves to import.</string>

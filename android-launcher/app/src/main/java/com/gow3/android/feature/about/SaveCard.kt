@@ -69,5 +69,11 @@ internal fun SaveCard(
             fontSize = 11.sp,
             lineHeight = 16.sp,
         )
+        Text(
+            stringResource(R.string.save_import_cross_region),
+            color = LauncherColors.textMuted,
+            fontSize = 11.sp,
+            lineHeight = 16.sp,
+        )
     }
 }

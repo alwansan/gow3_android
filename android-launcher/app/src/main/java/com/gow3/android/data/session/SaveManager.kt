@@ -164,21 +164,27 @@ internal class SaveManager(private val activity: Activity) {
         return try {
             val first = activity.contentResolver.openInputStream(uri)
                 ?: return SaveResult.Failed(activity.getString(R.string.save_read_failed))
-            val problem = first.use { SaveArchive.validate(it, expected) }
-            if (problem != null) return SaveResult.Failed(saveArchiveProblemMessage(problem))
+            val check = first.use { SaveArchive.check(it, expected) }
+            if (check.problem != null) return SaveResult.Failed(saveArchiveProblemMessage(check.problem))
 
             staging.deleteRecursively()
             val second = activity.contentResolver.openInputStream(uri)
                 ?: return SaveResult.Failed(activity.getString(R.string.save_read_failed))
-            second.use { SaveArchive.extract(it, staging) }
+            // 归档来自兼容区域代号（例如 CUSA01715）时重写为当前游戏目录，否则原样解压。
+            val remapped = check.title != null && expected != null && check.title != expected
+            second.use { SaveArchive.extract(it, staging, expected) }
 
             val savedata = savedataDir()
             val backup = backupExisting(savedata)
             SaveArchive.replaceStaging(staging, savedata)
-            SaveResult.Success(
-                if (backup != null) activity.getString(R.string.save_imported_with_backup_fmt, backup.name)
-                else activity.getString(R.string.save_imported),
-            )
+            val result = when {
+                remapped && backup != null ->
+                    activity.getString(R.string.save_imported_remapped_with_backup_fmt, check.title, expected, backup.name)
+                remapped -> activity.getString(R.string.save_imported_remapped_fmt, check.title, expected)
+                backup != null -> activity.getString(R.string.save_imported_with_backup_fmt, backup.name)
+                else -> activity.getString(R.string.save_imported)
+            }
+            SaveResult.Success(result)
         } catch (ex: Exception) {
             staging.deleteRecursively()
             SaveResult.Failed(activity.getString(R.string.save_import_failed_fmt, ex.message ?: activity.getString(R.string.unknown_error)))
