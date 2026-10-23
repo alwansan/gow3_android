@@ -22,8 +22,8 @@ android {
         applicationId = "com.gow3.android.bionic"
         minSdk = 28
         targetSdk = 28
-        versionCode = 4
-        versionName = "2.1.7-bionic-v3"
+        versionCode = 2010704
+        versionName = "2.1.7-bionic-v4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
