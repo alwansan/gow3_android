@@ -67,15 +67,15 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
     if (is_rendering && render_state == new_state) {
         return;
     }
-    // 切流收口后（CommandBuffer 进 direct / KickRecording 切流 / SubmitExecution 提交）同一 state
-    // 的重开要续接上一代附件内容：用 LOAD 而不是 CLEAR（对齐 Bloodborne resume_rendering 语义）。
-    const bool resume = resume_rendering && !is_rendering && render_state == new_state;
-    resume_rendering = false;
+    // KickRecording / CommandBuffer 不更换 command buffer 代，因此这里不做跨代续接：每次
+    // BeginRendering 都按调用方的 is_clear/depth_clear/stencil_clear 契约决定 CLEAR/LOAD，
+    // 避免改变帧首清屏语义。
     EndRendering();
     is_rendering = true;
     render_state = new_state;
     // 配对护栏：只有确实要录制 Begin 才递增；同 state 续接在上面的提前返回里已排除。
     render_pass_pairing.OnBegin();
+    NoteEvent(EventBeginPass);
     const auto producer = ObserveProducer("BeginRendering");
 
     std::array<vk::RenderingAttachmentInfo, 8> color_attachments;
@@ -84,8 +84,7 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
         color_attachments[i] = vk::RenderingAttachmentInfo{
             .imageView = cb.image_view,
             .imageLayout = cb.image_layout,
-            .loadOp = cb.is_clear && !resume ? vk::AttachmentLoadOp::eClear
-                                             : vk::AttachmentLoadOp::eLoad,
+            .loadOp = cb.is_clear ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad,
             .storeOp = vk::AttachmentStoreOp::eStore,
             .clearValue = vk::ClearValue{.color = vk::ClearColorValue{.uint32 = cb.clear_value}},
         };
@@ -95,8 +94,7 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
     const vk::RenderingAttachmentInfo depth_attachment = {
         .imageView = db.image_view,
         .imageLayout = db.image_layout,
-        .loadOp = db.depth_clear && !resume ? vk::AttachmentLoadOp::eClear
-                                            : vk::AttachmentLoadOp::eLoad,
+        .loadOp = db.depth_clear ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad,
         .storeOp = vk::AttachmentStoreOp::eStore,
         .clearValue =
             vk::ClearValue{.depthStencil = vk::ClearDepthStencilValue{.depth = std::bit_cast<float>(
@@ -105,8 +103,7 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
     const vk::RenderingAttachmentInfo stencil_attachment = {
         .imageView = db.image_view,
         .imageLayout = db.image_layout,
-        .loadOp = db.stencil_clear && !resume ? vk::AttachmentLoadOp::eClear
-                                              : vk::AttachmentLoadOp::eLoad,
+        .loadOp = db.stencil_clear ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad,
         .storeOp = vk::AttachmentStoreOp::eStore,
         .clearValue = vk::ClearValue{.depthStencil =
                                          vk::ClearDepthStencilValue{.stencil = db.clear_value[1]}},
@@ -153,17 +150,97 @@ void Scheduler::EndRendering() {
     // 入队前并发提交换代，End 落进下一代）。此时告警并放弃该命令，不让驱动解引用空 subpass；
     // 告警代表仍有状态错配，不是已修复。
     if (!render_pass_pairing.OnEnd()) {
-        std::printf("GPU pairing guard: EndRendering without Begin discarded (resume=%d, caller=%p); "
+        std::printf("GPU pairing guard: EndRendering without Begin discarded (caller=%p); "
                     "render pass state mismatch remains\n",
-                    resume_rendering ? 1 : 0, __builtin_return_address(0));
+                    __builtin_return_address(0));
+        std::fflush(stdout);
+        NoteEvent(EventGuardReject);
         is_rendering = false;
         return;
     }
     is_rendering = false;
+    NoteEvent(EventEndPass);
     Record([this](vk::CommandBuffer cmdbuf) {
         ObserveRenderEnd(cmdbuf, "Scheduler::EndRendering");
         cmdbuf.endRendering();
     });
+}
+
+const char* Scheduler::RecentEventName(u32 kind) {
+    switch (kind) {
+    case EventSubmit:
+        return "submit";
+    case EventBeginPass:
+        return "begin-pass";
+    case EventEndPass:
+        return "end-pass";
+    case EventGuardReject:
+        return "guard-reject";
+    case EventSwap:
+        return "swap-generation";
+    case EventDirectEnter:
+        return "direct-enter";
+    case EventDirectLeave:
+        return "direct-leave";
+    }
+    return "?";
+}
+
+void Scheduler::NoteEvent(RecentEventKind kind, u64 value) {
+    // 默认关闭：正常游玩零开销。需要抓稀发设备丢失时设 GOW3_SCHED_TRACE=1。
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_SCHED_TRACE");
+        return env && env[0] == '1';
+    }();
+    if (!enabled) {
+        return;
+    }
+    const u64 now_ms = u64(std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count());
+    std::scoped_lock lk{recent_mutex};
+    RecentEvent& event = recent_events[recent_event_index % RecentEventCount];
+    event.time_ms = now_ms;
+    event.value = value;
+    event.kind = kind;
+    event.depth = render_pass_pairing.Depth();
+    event.flags = (is_rendering ? 1u : 0u) | (direct_mode ? 2u : 0u);
+    event.width = render_state.width;
+    event.height = render_state.height;
+    event.colors = render_state.num_color_attachments;
+    ++recent_event_index;
+}
+
+void Scheduler::DumpWaitState(vk::Result result, u64 tick) {
+    const u64 now_ms = u64(std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count());
+    std::scoped_lock lk{recent_mutex};
+    std::printf("GPU wait state (%s): tick=%llu, GPU tick=%llu, pairing_depth=%u, "
+                "is_rendering=%d, direct_mode=%d, queued_chunks=%zu, open=%ux%u colors=%u, "
+                "events=%u\n",
+                vk::to_string(result).c_str(), (unsigned long long)tick,
+                (unsigned long long)work_semaphore.KnownGpuTick(), render_pass_pairing.Depth(),
+                is_rendering ? 1 : 0, direct_mode ? 1 : 0,
+                queued_chunks.load(std::memory_order_relaxed), render_state.width,
+                render_state.height, render_state.num_color_attachments, recent_event_index);
+    const u32 count = std::min<u32>(recent_event_index, RecentEventCount);
+    if (count != 0) {
+        const u32 first =
+            recent_event_index > RecentEventCount ? recent_event_index - RecentEventCount : 0;
+        const u64 base = recent_events[first % RecentEventCount].time_ms;
+        for (u32 i = 0; i < count; ++i) {
+            const RecentEvent& event = recent_events[(first + i) % RecentEventCount];
+            std::printf("    %+.3f s %s value=%llu depth=%u%s%s %ux%u colors=%u\n",
+                        double(event.time_ms - base) / 1000.0, RecentEventName(event.kind),
+                        (unsigned long long)event.value, event.depth,
+                        (event.flags & 1u) ? " rendering" : "",
+                        (event.flags & 2u) ? " direct" : "", event.width, event.height,
+                        event.colors);
+        }
+    }
+    std::printf("  wall time %llu ms\n", (unsigned long long)now_ms);
+    std::fflush(stdout);
 }
 
 void Scheduler::TraceDirectRecording(void* caller) {
@@ -264,14 +341,16 @@ void Scheduler::KickRecording(bool force) {
     }
     std::scoped_lock kick_lock{kick_mutex};
     const auto producer = ObserveProducer("KickRecording");
-    // 切流前收口：Begin 闭包已入队（或已执行）而 End 尚未入队时，切流交给 RecorderThread 后 End
-    // 会落进下一 command buffer 代（跨代错位）。这里先收口并把续接标记给下一个 BeginRendering。
-    if (is_rendering) {
-        EndRendering();
-        resume_rendering = true;
-    }
+    // KickRecording 不更换 command buffer 代（换代只在 SubmitExecution 之后的
+    // AllocateWorkerCommandBuffers）。在这里收口会让每个 draw/dispatch 都触发一次结束/重开；
+    // Adreno 为 tiled 架构，每次收口等于 GMEM resolve + reload，实测把 60 FPS 压到 30 FPS。
+    // 跨代错位由配对护栏拦截，提交前收口在 SubmitExecution 完成。
     // Callers kick where nobody holds the raw command buffer: deferral resumes.
+    const bool was_direct = direct_mode;
     direct_mode = false;
+    if (was_direct) {
+        NoteEvent(EventDirectLeave);
+    }
     // Batches of tens of KiB keep the queue handoff cheap relative to the work it carries.
     if (!force && full_chunks.empty() && CurrentChunk().Size() < 32 * 1024) {
         return;
@@ -397,9 +476,15 @@ void Scheduler::Wait(u64 tick, std::source_location caller, u64 submit_ns) {
     }
     Gow3Stats::WaitTimer timer{Gow3Stats::tick_wait_ns};
     const auto submitted = diagnose ? std::chrono::steady_clock::now() : start;
-    // 卡死检测：等 5 秒还没到说明 GPU 可能挂死，先打印等待状态和 breadcrumbs 报告再继续等。
-    // 报告只打一次（ReportStuck 内部保证），继续等的部分保持原有阻塞语义。
-    if (!work_semaphore.WaitFor(tick, 5'000'000'000ull)) {
+    // 卡死检测：等 5 秒还没到说明 GPU 可能挂死，先打印等待状态、最近调度事件和 breadcrumbs
+    // 报告再继续等。报告只打一次（ReportStuck 内部保证），继续等的部分保持原有阻塞语义。
+    const vk::Result wait_result = work_semaphore.WaitForResult(tick, 5'000'000'000ull);
+    if (wait_result != vk::Result::eSuccess) {
+        DumpWaitState(wait_result, tick);
+        if (wait_result == vk::Result::eErrorDeviceLost) {
+            Breadcrumbs::ReportDeviceLost("waiting for a submission");
+            ASSERT_MSG(false, "Device lost while waiting for a submission");
+        }
 #ifndef _WIN32
         char thread[16] = {};
         pthread_getname_np(pthread_self(), thread, sizeof(thread));
@@ -455,6 +540,7 @@ void Scheduler::AllocateWorkerCommandBuffers() {
     // 已先 EndRendering 收口；换代重置使"Begin 在旧代、孤立 End 在新代"的错位被 EndRendering
     // 护栏拦截（深度 0 时告警并跳过）。
     render_pass_pairing.OnSwap();
+    NoteEvent(EventSwap);
 
     current_cmdbuf = command_pool.Commit();
     ObserveNewSequence(current_cmdbuf);
@@ -477,6 +563,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     std::scoped_lock lk{submit_mutex};
     const auto producer = ObserveProducer("SubmitExecution");
     const u64 signal_value = work_semaphore.NextTick();
+    NoteEvent(EventSubmit, signal_value);
     static const bool bounded_submit =
         Gow3Mobile::Android() && !Gow3Mobile::Enabled("GOW3_VK_POLL_EACH_SUBMIT", false);
     if (bounded_submit) {

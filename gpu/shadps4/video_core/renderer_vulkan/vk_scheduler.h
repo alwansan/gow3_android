@@ -702,14 +702,12 @@ public:
     /// KickRecording() or submission.
     [[gnu::noinline]] vk::CommandBuffer CommandBuffer() {
         if (recording_threaded && !direct_mode) {
-            // 进 direct 前收口：Begin 已入队（或已执行）而 End 尚未入队的窗口里，并发提交换
-            // 代会让 End 落进下一代（跨代错位）。这里先收口并把续接标记给下一个 BeginRendering。
-            if (is_rendering) {
-                EndRendering();
-                resume_rendering = true;
-            }
+            // 进 direct 不更换 command buffer 代：SyncRecording 先排空延迟批次，命令顺序不变。
+            // 这里不结束渲染范围，否则每次取裸 command buffer 都会多一次 pass 断裂
+            // （Adreno 上等于 GMEM resolve + reload）；跨代错位由配对护栏拦截。
             SyncRecording();
             direct_mode = true;
+            NoteEvent(EventDirectEnter);
             direct_recordings.fetch_add(1, std::memory_order_relaxed);
             TraceDirectRecording(__builtin_return_address(0));
         }
@@ -887,6 +885,32 @@ public:
 private:
     void AllocateWorkerCommandBuffers();
 
+    /// gow3: 设备丢失/卡死取证用的最近调度事件环形缓冲。只记录 pass/submit/换代级别的事件，
+    /// 不进入每条 draw 的热路径；设备丢失或等待超时时打印最后 64 条，定位挂死前发生了什么。
+    enum RecentEventKind : u32 {
+        EventSubmit = 0,
+        EventBeginPass,
+        EventEndPass,
+        EventGuardReject,
+        EventSwap,
+        EventDirectEnter,
+        EventDirectLeave,
+    };
+    struct RecentEvent {
+        u64 time_ms;
+        u64 value;
+        u32 kind;
+        u32 depth;
+        u32 flags; ///< bit0 is_rendering, bit1 direct_mode
+        u32 width;
+        u32 height;
+        u32 colors;
+    };
+    static constexpr u32 RecentEventCount = 64;
+    static const char* RecentEventName(u32 kind);
+    void NoteEvent(RecentEventKind kind, u64 value = 0);
+    void DumpWaitState(vk::Result result, u64 tick);
+
     std::unique_ptr<RecordChunk> AcquireChunk();
 
     /// Returns the writable chunk. The replacement is installed before a chunk is handed over,
@@ -935,15 +959,16 @@ private:
     std::jthread priority_pending_ops_thread;
     RenderState render_state;
     bool is_rendering = false;
-    // gow3: 切流收口后由下一个 BeginRendering 用 LOAD 续接附件（对齐 Bloodborne resume_rendering）。
-    // 只由录制侧单线程读写；换代（SubmitExecution 持 submit_mutex）与 direct 切换在同一线程完成。
-    bool resume_rendering = false;
     // gow3: 配对护栏：按 command buffer 代计数的渲染深度（生产路径复用 vk_render_pass_pairing.h，
     // 宿主行为测试用同一实现）。BeginRendering 递增、EndRendering 递减，换代（AllocateWorkerCommandBuffers）
     // 重置为 0。EndRendering 在深度为 0 时说明记录侧没有对应 Begin（跨代错位），此时告警并跳过该命令，
     // 不让驱动解引用空 subpass。深度只统计"确实会录制的 Begin"，同 state 续接不重复递增；护栏在并发下
     // 是保守下界，只拦确定非法的 End，不误伤合法配对。
     RenderPassPairing render_pass_pairing;
+    // gow3: 设备丢失/卡死取证（见 NoteEvent）。
+    std::array<RecentEvent, RecentEventCount> recent_events{};
+    u32 recent_event_index = 0;
+    std::mutex recent_mutex;
     // gow3: threaded recording
     std::unique_ptr<RecordChunk> record_chunk;
     std::vector<std::unique_ptr<RecordChunk>> full_chunks;
