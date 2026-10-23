@@ -11,6 +11,9 @@
 # usage: run-bionic.sh [game|vulkan]   env from the app: GOW3_SCREEN_W/SCREEN_H、GOW3_GAME_DIR、
 #        GOW3_APP0_DIR、GOW3_ANDROID_INPUT=1
 set -eu
+# gow3: Bloodborne 风格的可选切段——每 128 KiB 录制量收口一次 open render pass，
+# 下一次同 state 的 Begin 用 LOAD 续接；0 关闭（纯单 pass 录制）。
+export GOW3_PASS_CUT_KB=${GOW3_PASS_CUT_KB:-128}
 files=${FXD_FILES:-/data/user/0/com.gow3.android.bionic/files}
 base="$files/gow3port"
 bionic="$base/bionic"
