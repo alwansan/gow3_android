@@ -29,6 +29,19 @@
 
 namespace Vulkan {
 
+namespace {
+/// gow3: Bloodborne 风格的可选切段阈值。0（默认）关闭，正常路径不产生任何额外 pass 断裂；
+/// >0 时每录制这么多 KiB 就收口一次 open render pass，并在下一次同 state 的 Begin 用 LOAD 续接。
+size_t PassCutBytes() {
+    static const size_t bytes = [] {
+        const char* env = std::getenv("GOW3_PASS_CUT_KB");
+        const int kb = env ? std::atoi(env) : 0;
+        return kb > 0 ? size_t(kb) * 1024 : size_t{0};
+    }();
+    return bytes;
+}
+} // namespace
+
 std::mutex Scheduler::submit_mutex;
 
 Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
@@ -43,6 +56,11 @@ Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
     // GPU breadcrumbs：每个 scheduler 是一个命令流（vk_breadcrumbs.h）。
     crumb_stream = Breadcrumbs::NewStream(
         instance, recording_threaded ? "game draws and composition" : "presentation");
+    if (const size_t cut = PassCutBytes(); cut != 0) {
+        std::printf("GPU: cut an open render pass every %zu KiB of recording "
+                    "(GOW3_PASS_CUT_KB=0 disables)\n",
+                    cut / 1024);
+    }
 #if TRACY_GPU_ENABLED
     profiler_scope = reinterpret_cast<tracy::VkCtxScope*>(std::malloc(sizeof(tracy::VkCtxScope)));
 #endif
@@ -67,9 +85,10 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
     if (is_rendering && render_state == new_state) {
         return;
     }
-    // KickRecording / CommandBuffer 不更换 command buffer 代，因此这里不做跨代续接：每次
-    // BeginRendering 都按调用方的 is_clear/depth_clear/stencil_clear 契约决定 CLEAR/LOAD，
-    // 避免改变帧首清屏语义。
+    // 只有按字节阈值切段（KickRecording）后、同一 state 的继续才用 LOAD 续接；普通重开仍按
+    // 调用方的 is_clear/depth_clear/stencil_clear 契约，避免改变帧首清屏语义。
+    const bool resume = resume_rendering && !is_rendering && render_state == new_state;
+    resume_rendering = false;
     EndRendering();
     is_rendering = true;
     render_state = new_state;
@@ -84,7 +103,8 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
         color_attachments[i] = vk::RenderingAttachmentInfo{
             .imageView = cb.image_view,
             .imageLayout = cb.image_layout,
-            .loadOp = cb.is_clear ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad,
+            .loadOp = cb.is_clear && !resume ? vk::AttachmentLoadOp::eClear
+                                             : vk::AttachmentLoadOp::eLoad,
             .storeOp = vk::AttachmentStoreOp::eStore,
             .clearValue = vk::ClearValue{.color = vk::ClearColorValue{.uint32 = cb.clear_value}},
         };
@@ -94,7 +114,8 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
     const vk::RenderingAttachmentInfo depth_attachment = {
         .imageView = db.image_view,
         .imageLayout = db.image_layout,
-        .loadOp = db.depth_clear ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad,
+        .loadOp = db.depth_clear && !resume ? vk::AttachmentLoadOp::eClear
+                                            : vk::AttachmentLoadOp::eLoad,
         .storeOp = vk::AttachmentStoreOp::eStore,
         .clearValue =
             vk::ClearValue{.depthStencil = vk::ClearDepthStencilValue{.depth = std::bit_cast<float>(
@@ -103,7 +124,8 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
     const vk::RenderingAttachmentInfo stencil_attachment = {
         .imageView = db.image_view,
         .imageLayout = db.image_layout,
-        .loadOp = db.stencil_clear ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad,
+        .loadOp = db.stencil_clear && !resume ? vk::AttachmentLoadOp::eClear
+                                              : vk::AttachmentLoadOp::eLoad,
         .storeOp = vk::AttachmentStoreOp::eStore,
         .clearValue = vk::ClearValue{.depthStencil =
                                          vk::ClearDepthStencilValue{.stencil = db.clear_value[1]}},
@@ -156,9 +178,11 @@ void Scheduler::EndRendering() {
         std::fflush(stdout);
         NoteEvent(EventGuardReject);
         is_rendering = false;
+        bytes_since_cut = 0;
         return;
     }
     is_rendering = false;
+    bytes_since_cut = 0;
     NoteEvent(EventEndPass);
     Record([this](vk::CommandBuffer cmdbuf) {
         ObserveRenderEnd(cmdbuf, "Scheduler::EndRendering");
@@ -350,6 +374,27 @@ void Scheduler::KickRecording(bool force) {
     direct_mode = false;
     if (was_direct) {
         NoteEvent(EventDirectLeave);
+        // 对齐 Bloodborne 的 LeaveDirectSegment：离开 direct 段时收口 open pass，下一次同
+        // state 的 BeginRendering 用 LOAD 续接。
+        if (is_rendering) {
+            EndRendering();
+            resume_rendering = true;
+        }
+        last_chunk_size = CurrentChunk().Size();
+    } else {
+        // gow3: 不逐 draw 收口（那等于每绘制一次 GMEM resolve + reload）。只按字节阈值切段：
+        // 累计录制量达到 GOW3_PASS_CUT_KB 时收口一次 open pass，并让下一次同 state 的
+        // BeginRendering 用 LOAD 续接。阈值 0（默认）时这里只是两次比较。
+        const size_t chunk_size = CurrentChunk().Size();
+        bytes_since_cut +=
+            chunk_size >= last_chunk_size ? chunk_size - last_chunk_size : chunk_size;
+        last_chunk_size = chunk_size;
+        if (const size_t cut = PassCutBytes();
+            cut != 0 && is_rendering && bytes_since_cut >= cut) {
+            EndRendering();
+            resume_rendering = true;
+            last_chunk_size = CurrentChunk().Size();
+        }
     }
     // Batches of tens of KiB keep the queue handoff cheap relative to the work it carries.
     if (!force && full_chunks.empty() && CurrentChunk().Size() < 32 * 1024) {
@@ -541,6 +586,8 @@ void Scheduler::AllocateWorkerCommandBuffers() {
     // 护栏拦截（深度 0 时告警并跳过）。
     render_pass_pairing.OnSwap();
     NoteEvent(EventSwap);
+    bytes_since_cut = 0;
+    last_chunk_size = 0;
 
     current_cmdbuf = command_pool.Commit();
     ObserveNewSequence(current_cmdbuf);
@@ -585,6 +632,8 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     }
 
     EndRendering();
+    // 提交会结束这一代的渲染范围；下一次 Begin 不从上一代续接（避免把上一帧的附件内容带进来）。
+    resume_rendering = false;
     if (auto* profiler = GpuProfiler::Get(); profiler && profiler->Records(this)) {
         // Until the next submission's first timestamp: mostly the GPU waiting for it.
         profiler->Mark(0x5B317ull, [] { return std::string{"(between submissions: GPU idle)"}; });
