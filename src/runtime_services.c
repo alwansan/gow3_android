@@ -472,6 +472,8 @@ static ABI int32_t save_open(const unsigned char *p) {
     }
     if (save_dialog.mode!=SAVE_MODE_LIST) return dialog_open_mode(2,p,52,5);
     memcpy(&save_dialog.type,p+56,4);
+    /* newItem is a valid list row only for SAVE; LOAD/DELETE indices address dirName directly. */
+    if (save_dialog.type != 1) save_dialog.has_new=0;
     const char *bridge=save_dialog_bridge();
     const char *labels[33], *icons[33];
     int n=save_choice_build(labels,icons);

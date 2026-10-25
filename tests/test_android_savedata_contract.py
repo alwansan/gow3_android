@@ -38,7 +38,7 @@ class AndroidSaveDataContractTests(unittest.TestCase):
         gradle = (ROOT / "android-launcher/app/build.gradle.kts").read_text(encoding="utf-8")
         version = re.search(r'versionName = "([^"]+)"', gradle).group(1)
         self.assertRegex(version, r"^\d+(?:\.\d+)*-bionic-v\d+$")
-        self.assertIn('versionCode = 2010706', gradle)
+        self.assertIn('versionCode = 2010707', gradle)
 
     def test_shared_signing_key_is_pinned_and_validated(self):
         workflow = (ROOT / ".github/workflows/android.yml").read_text(encoding="utf-8")
@@ -46,6 +46,16 @@ class AndroidSaveDataContractTests(unittest.TestCase):
         self.assertIn('expected="adc33989411007d6eb63496b3b6ce2f4c73c8222"', workflow)
         self.assertIn('keytool -list -keystore "$key" -storepass android -alias androiddebugkey', workflow)
         self.assertIn("shared public debug key from alwansan/CP", workflow)
+
+    def test_new_save_item_is_only_offered_for_save_dialog(self):
+        services = (ROOT / "src/runtime_services.c").read_text(encoding="utf-8")
+        type_read = services.index("memcpy(&save_dialog.type,p+56,4);")
+        guard = services.index("if (save_dialog.type != 1) save_dialog.has_new=0;")
+        self.assertGreater(guard, type_read)
+
+    def test_missing_open_logs_guest_and_host_paths(self):
+        vfs = (ROOT / "src/runtime_file.c").read_text(encoding="utf-8")
+        self.assertIn('Runtime: open(%s -> %s) -> not found (errno=%d)', vfs)
 
     def test_package_id_matches_runtime_manifest_and_apk_validator(self):
         gradle = (ROOT / "android-launcher/app/build.gradle.kts").read_text(encoding="utf-8")

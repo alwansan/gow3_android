@@ -215,13 +215,13 @@ static int64_t do_open(const char *guest,int flags,int mode) {
         if (!(dir=list_directory(path))) return -EACCES;
     } else if (flags&0x20000) {
         e=errno==ENOENT ? ENOENT : ENOTDIR;
-        if (e==ENOENT) { ++missing; printf("Runtime: open(%s) -> not found\n",guest); }
+        if (e==ENOENT) { ++missing; fprintf(stderr,"Runtime: open(%s -> %s) -> not found (errno=%d)\n",guest,path,e); }
         return -e;
     } else {
         host=open(path,host_flags(flags)&~O_DIRECTORY,_S_IREAD|_S_IWRITE);
         if (host<0) {
             e=errno;
-            if (e==ENOENT) { ++missing; printf("Runtime: open(%s) -> not found\n",guest); }
+            if (e==ENOENT) { ++missing; fprintf(stderr,"Runtime: open(%s -> %s) -> not found (errno=%d)\n",guest,path,e); }
             return -e;
         }
         if (host_fstat(host,&s)) memset(&s,0,sizeof(s));
@@ -230,7 +230,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     int host=open(path,host_flags(flags),mode ? mode : 0644);
     if (host<0) {
         e=errno;
-        if (e==ENOENT) { ++missing; printf("Runtime: open(%s) -> not found\n",guest); }
+        if (e==ENOENT) { ++missing; fprintf(stderr,"Runtime: open(%s -> %s) -> not found (errno=%d)\n",guest,path,e); }
         return -e;
     }
     struct stat s;
