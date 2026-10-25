@@ -38,7 +38,14 @@ class AndroidSaveDataContractTests(unittest.TestCase):
         gradle = (ROOT / "android-launcher/app/build.gradle.kts").read_text(encoding="utf-8")
         version = re.search(r'versionName = "([^"]+)"', gradle).group(1)
         self.assertRegex(version, r"^\d+(?:\.\d+)*-bionic-v\d+$")
-        self.assertIn('versionCode = 2010705', gradle)
+        self.assertIn('versionCode = 2010706', gradle)
+
+    def test_shared_signing_key_is_pinned_and_validated(self):
+        workflow = (ROOT / ".github/workflows/android.yml").read_text(encoding="utf-8")
+        self.assertIn("https://raw.githubusercontent.com/alwansan/CP/ce5ea5796fde91207e9e9bc1d6e75b7800a4af37/signing/checkpoint145-debug.keystore", workflow)
+        self.assertIn('expected="adc33989411007d6eb63496b3b6ce2f4c73c8222"', workflow)
+        self.assertIn('keytool -list -keystore "$key" -storepass android -alias androiddebugkey', workflow)
+        self.assertIn("shared public debug key from alwansan/CP", workflow)
 
     def test_package_id_matches_runtime_manifest_and_apk_validator(self):
         gradle = (ROOT / "android-launcher/app/build.gradle.kts").read_text(encoding="utf-8")

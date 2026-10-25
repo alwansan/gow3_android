@@ -161,7 +161,7 @@ jobs:
             exit 1
           fi
 
-      - name: Restore signing keystore
+      - name: Restore signing keystore from GitHub Secrets
         if: env.ANDROID_KEYSTORE_BASE64 != ''
         shell: bash
         run: |
@@ -171,17 +171,50 @@ jobs:
               echo "Missing required GitHub secret: $name" >&2
               exit 1
             fi
-            printf '::add-mask::%s\n' "${!name}"
+            printf '::add-mask::%s\\n' "${!name}"
           done
           bash tools/android/inputs/prepare_signing.sh "$GOW3_KEYSTORE"
+
+      # Fallback to the same public debug key used by the owner's CP repo. It is deliberately
+      # pinned to a commit and Git blob SHA so changed/replaced bytes fail closed. This key is
+      # PUBLIC and only suitable for personal/test builds, not trusted public distribution.
+      - name: Restore shared signing key from CP (fallback)
+        if: env.ANDROID_KEYSTORE_BASE64 == ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          key="$GOW3_KEYSTORE"
+          mkdir -p "$(dirname -- "$key")"
+          curl --fail --location --silent --show-error \
+            "https://raw.githubusercontent.com/alwansan/CP/ce5ea5796fde91207e9e9bc1d6e75b7800a4af37/signing/checkpoint145-debug.keystore" \
+            --output "$key"
+          expected="adc33989411007d6eb63496b3b6ce2f4c73c8222"
+          actual="$(git hash-object "$key")"
+          if [[ "$actual" != "$expected" ]]; then
+            rm -f -- "$key"
+            echo "Shared signing keystore blob SHA mismatch; refusing to sign" >&2
+            exit 1
+          fi
+          echo "::add-mask::android"
+          keytool -list -keystore "$key" -storepass android -alias androiddebugkey >/dev/null 2>&1 || {
+            rm -f -- "$key"
+            echo "Shared signing keystore or expected alias/password is invalid" >&2
+            exit 1
+          }
+          {
+            echo "GOW3_KEYSTORE_PASSWORD=android"
+            echo "GOW3_KEY_ALIAS=androiddebugkey"
+            echo "GOW3_KEY_PASSWORD=android"
+          } >> "$GITHUB_ENV"
 
       - name: Record signing mode
         shell: bash
         run: |
-          if [[ -n ${GOW3_KEYSTORE_PASSWORD:-} ]]; then
-            echo "SIGNING_MODE=formal release keystore" >> "$GITHUB_ENV"
+          if [[ -n ${ANDROID_KEYSTORE_BASE64:-} ]]; then
+            echo "SIGNING_MODE=GitHub Actions keystore secret" >> "$GITHUB_ENV"
           else
-            echo "SIGNING_MODE=local development key (NOT a release signature)" >> "$GITHUB_ENV"
+            echo "SIGNING_MODE=shared public debug key from alwansan/CP (NOT a secure release signature)" >> "$GITHUB_ENV"
           fi
 
       - name: Fetch Steam libraries
