@@ -15,7 +15,10 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#ifndef _WIN32
+#ifdef _WIN32
+#include <io.h>
+#include <windows.h>
+#else
 #include <ftw.h>
 #endif
 
@@ -89,10 +92,45 @@ static int valid_name(const char *name, size_t max) {
     for (size_t i=0;i<n;++i) if (name[i]=='/' || name[i]=='\\' || (name[i]=='.' && (i==0 || name[i-1]=='.'))) return 0;
     return 1;
 }
-static void write_param(const char *meta, const Param *p) {
-    char path[700]; snprintf(path,sizeof(path),"%s/param.bin",meta);
-    FILE *f=fopen(path,"wb");
-    if (f) { Param copy=*p; copy.mtime=time(NULL); fwrite(&copy,sizeof(copy),1,f); fclose(f); }
+/* Publish metadata only after the complete record has reached disk. A torn param.bin
+ * makes an otherwise valid save disappear from the game's list after a crash or force-stop. */
+static int write_param(const char *meta, const Param *p) {
+    char path[700], temporary[720];
+    if (!meta || !p ||
+        snprintf(path,sizeof(path),"%s/param.bin",meta)>=(int)sizeof(path) ||
+        snprintf(temporary,sizeof(temporary),"%s/param.bin.tmp",meta)>=(int)sizeof(temporary)) {
+        fprintf(stderr,"Runtime: SaveData param path is too long or invalid\n");
+        return -1;
+    }
+    FILE *f=fopen(temporary,"wb");
+    if (!f) {
+        fprintf(stderr,"Runtime: cannot create %s: errno=%d\n",temporary,errno);
+        return -1;
+    }
+    Param copy=*p;
+    copy.mtime=time(NULL);
+    int ok=fwrite(&copy,sizeof(copy),1,f)==1;
+    if (ok && fflush(f)) ok=0;
+#ifdef _WIN32
+    if (ok && _commit(_fileno(f))) ok=0;
+#else
+    if (ok && fsync(fileno(f))) ok=0;
+#endif
+    if (fclose(f)) ok=0;
+    if (ok) {
+#ifdef _WIN32
+        ok=MoveFileExA(temporary,path,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
+#else
+        ok=rename(temporary,path)==0;
+#endif
+    }
+    if (!ok) {
+        int saved_errno=errno;
+        remove(temporary);
+        fprintf(stderr,"Runtime: failed to publish %s atomically: errno=%d\n",path,saved_errno);
+        return -1;
+    }
+    return 0;
 }
 static int read_param(const char *meta, Param *p) {
     char path[700]; snprintf(path,sizeof(path),"%s/param.bin",meta);
@@ -143,7 +181,12 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
     snprintf(host,sizeof(host),"%s/%s",base,dir->data);
     snprintf(meta,sizeof(meta),"%s/%s.sce_sys",base,dir->data);
     struct stat st;
-    int exists=!stat(host,&st) && S_ISDIR(st.st_mode);
+    int host_stat_result=stat(host,&st);
+    if (!host_stat_result && !S_ISDIR(st.st_mode)) {
+        fprintf(stderr,"Runtime: save path is not a directory: '%s'\n",host);
+        return ERR_INTERNAL;
+    }
+    int exists=!host_stat_result && S_ISDIR(st.st_mode);
     if ((mode & MODE_CREATE) && exists) return ERR_EXISTS;
     if (!(mode & (MODE_CREATE|MODE_CREATE2)) && !exists) return ERR_NOT_FOUND;
     pthread_mutex_lock(&lock);
@@ -153,17 +196,35 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
         if (!slots[i].used && slot<0) slot=i;
     }
     if (slot<0) { pthread_mutex_unlock(&lock); return ERR_MOUNT_FULL; }
-    if (!exists && (make_dirs(host) || make_dirs(meta))) { pthread_mutex_unlock(&lock); return ERR_INTERNAL; }
-    if (!exists) { Param empty={0}; write_param(meta,&empty); }
+    if (!exists && (make_dirs(host) || make_dirs(meta))) {
+        fprintf(stderr,"Runtime: cannot create save directories for '%s'\n",dir->data);
+        pthread_mutex_unlock(&lock);
+        return ERR_INTERNAL;
+    }
+    if (!exists) {
+        Param empty={0};
+        if (write_param(meta,&empty)) {
+            fprintf(stderr,"Runtime: cannot initialize metadata for save '%s'\n",dir->data);
+            pthread_mutex_unlock(&lock);
+            return ERR_INTERNAL;
+        }
+    }
+    memset(result,0,sizeof(*result));
+    char point[32];
+    snprintf(point,sizeof(point),"/savedata%d",slot);
+    memcpy(result->point.data,point,strlen(point)+1);
+    /* Do not tell the guest that mounting succeeded unless the VFS registered it. */
+    if (runtime_file_mount(result->point.data,host)!=0) {
+        fprintf(stderr,"Runtime: save data mount failed: '%s' -> '%s' (VFS mount table full or path too long)\n",
+                dir->data,host);
+        memset(result,0,sizeof(*result));
+        pthread_mutex_unlock(&lock);
+        return ERR_MOUNT_FULL;
+    }
     slots[slot].used=1;
     snprintf(slots[slot].host,sizeof(slots[slot].host),"%s",host);
     snprintf(slots[slot].meta,sizeof(slots[slot].meta),"%s",meta);
-    memset(result,0,sizeof(*result));
-    char point[32];
-    snprintf(point,sizeof(point),"/savedata%d",slot&15);
-    memcpy(result->point.data,point,strlen(point)+1);
     result->status=exists ? 0 : 1; /* CREATED */
-    runtime_file_mount(result->point.data,host);
     ++mounts_done;
     pthread_mutex_unlock(&lock);
     printf("Runtime: save data '%s' mounted at %s (%s%s)\n",dir->data,result->point.data,
@@ -206,7 +267,10 @@ static ABI int32_t save_set_param(const MountPoint *point, uint32_t type, const 
     case 4: if (size<4) goto bad; memcpy(&p.user_param,buffer,4); break;
     default: goto bad;
     }
-    write_param(slots[slot].meta,&p);
+    if (write_param(slots[slot].meta,&p)) {
+        pthread_mutex_unlock(&lock);
+        return ERR_INTERNAL;
+    }
     pthread_mutex_unlock(&lock);
     return 0;
 bad:
@@ -308,7 +372,8 @@ static ABI int32_t memory_setup(int32_t user, uint64_t size, const Param *param)
     done:
         fclose(f);
     }
-    if (!r && param) write_param(dir,param);
+    if (!r && param && write_param(dir,param)) r=ERR_INTERNAL;
+    if (r) memory_size=0;
     pthread_mutex_unlock(&lock);
     if (!r) printf("Runtime: save data memory ready (%llu bytes)\n",(unsigned long long)size);
     return r;

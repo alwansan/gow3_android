@@ -31,7 +31,7 @@ typedef struct stat HostStat;
 #endif
 #define ERR(n) ((int32_t)(UINT32_C(0x80020000)|(n)))
 #define MAX_FILES 1024
-#define MAX_MOUNTS 16
+#define MAX_MOUNTS 32 /* 5 permanent mounts + up to 16 concurrent SaveData mounts */
 
 typedef struct { int64_t sec, nsec; } GuestTimespec;
 typedef struct {
@@ -61,7 +61,7 @@ int runtime_file_mount(const char *guest,const char *host) {
         snprintf(mounts[i].host,sizeof(mounts[i].host),"%s",host);
         pthread_mutex_unlock(&lock); return 0;
     }
-    if (mount_count==MAX_MOUNTS || strlen(guest)>=64 || strlen(host)>=512) { pthread_mutex_unlock(&lock); return -1; }
+    if (mount_count>=MAX_MOUNTS || strlen(guest)>=64 || strlen(host)>=512) { pthread_mutex_unlock(&lock); return -1; }
     snprintf(mounts[mount_count].guest,64,"%s",guest);
     snprintf(mounts[mount_count].host,512,"%s",host);
     ++mount_count;
@@ -361,7 +361,12 @@ static int64_t do_stat(const char *guest,GuestStat *out) {
     int e=translate(guest,path,sizeof(path));
     if (e) return -e;
     if (!out) return -EFAULT;
-    if (host_stat(path,&s)) return -errno;
+    if (host_stat(path,&s)) {
+        int e=errno;
+        if (e==ENOENT)
+            fprintf(stderr,"Runtime: stat(%s -> %s) -> not found\n",guest,path);
+        return -e;
+    }
     convert_stat(&s,out); return 0;
 }
 static int64_t do_getdents(int fd,char *buffer,uint64_t size,int64_t *basep) {
@@ -444,10 +449,17 @@ static int64_t do_access(const char *guest,int mode) {
     int e=translate(guest,path,sizeof(path));
     if (e) return -e;
 #ifdef _WIN32
-    return access(path,mode&6) ? -errno : 0; /* X_OK is invalid for the CRT */
+    int result=access(path,mode&6); /* X_OK is invalid for the CRT */
 #else
-    return access(path,mode&7) ? -errno : 0;
+    int result=access(path,mode&7);
 #endif
+    if (result) {
+        int error=errno;
+        if (error==ENOENT)
+            fprintf(stderr,"Runtime: access(%s -> %s) -> not found\n",guest,path);
+        return -error;
+    }
+    return 0;
 }
 
 /* Convention adapters: sceKernel* -> Orbis error codes, POSIX -> -1 + errno. */

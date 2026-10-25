@@ -1,7 +1,7 @@
 {
  "schema_version": 1,
  "profile": "release-bionic",
- "application_id": "com.gow3.android.bionic",
+ "application_id": "com.alwansan.gow3.android",
  "java_package": "com.gow3.android.game",
  "target_sdk": 28,
  "abi": "arm64-v8a",

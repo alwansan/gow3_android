@@ -19,11 +19,11 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.gow3.android.bionic"
+        applicationId = "com.alwansan.gow3.android"
         minSdk = 28
         targetSdk = 28
-        versionCode = 2010704
-        versionName = "2.1.7-bionic-v4"
+        versionCode = 2010705
+        versionName = "2.1.7-alwan-savefix1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

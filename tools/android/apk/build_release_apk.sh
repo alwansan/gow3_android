@@ -74,7 +74,7 @@ mkdir -p out/release
     --ks-pass "$ks_pass" --key-pass "$key_pass" \
     --out "$apk" "$unsigned"
 "$bt/apksigner" verify --verbose "$apk" >/dev/null
-"$bt/aapt" dump badging "$apk" | grep -F com.gow3.android.bionic >/dev/null
+"$bt/aapt" dump badging "$apk" | grep -F com.alwansan.gow3.android >/dev/null
 unzip -l "$apk" | grep -F lib/arm64-v8a/libgow3 >/dev/null
 python3 tools/android/apk/validate_release_apk.py "$apk" --aapt "$bt/aapt" \
     --manifest tools/android/runtime/runtime-manifest.bionic.json

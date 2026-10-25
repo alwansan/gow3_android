@@ -74,6 +74,9 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Check SaveData regression contracts
+        run: python -m unittest discover -s tests -p 'test_android_savedata_contract.py'
+
       - name: Restore Android SDK package cache
         uses: actions/cache@v4
         with:
