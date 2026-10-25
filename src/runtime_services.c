@@ -381,6 +381,12 @@ static int save_dialog_bridge_request(const char *path, uint32_t type, const cha
     char result[700], temporary[700];
     snprintf(result,sizeof(result),"%s.result",path);
     snprintf(temporary,sizeof(temporary),"%s.tmp",path);
+    /* Delete thumbnails left by the previous dialog before writing this request, otherwise
+     * a row without an icon could accidentally display an older save's image. */
+    for (int i=0;i<33;++i) {
+        char stale[700];
+        if (snprintf(stale,sizeof(stale),"%s.p%d",path,i)<(int)sizeof(stale)) unlink(stale);
+    }
     for (int i=0;i<count;++i) if (icons[i]) save_dialog_bridge_icon(path,i,icons[i]);
     unlink(result); /* 上一个被放弃的对话框留下的应答 */
     FILE *f=fopen(temporary,"w");
@@ -474,6 +480,10 @@ static ABI int32_t save_open(const unsigned char *p) {
     memcpy(&save_dialog.type,p+56,4);
     /* newItem is a valid list row only for SAVE; LOAD/DELETE indices address dirName directly. */
     if (save_dialog.type != 1) save_dialog.has_new=0;
+    printf("Runtime: SaveDataDialog open: mode=%u type=%u user=%d existing=%d has_new=%d\n",
+           save_dialog.mode,save_dialog.type,USER_ID,save_dialog.dir_count,save_dialog.has_new);
+    for (int i=0;i<save_dialog.dir_count;++i)
+        printf("Runtime: SaveDataDialog directory[%d]=%.*s\n",i,32,save_dialog.dirs[i]);
     const char *bridge=save_dialog_bridge();
     const char *labels[33], *icons[33];
     int n=save_choice_build(labels,icons);

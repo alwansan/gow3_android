@@ -38,7 +38,7 @@ class AndroidSaveDataContractTests(unittest.TestCase):
         gradle = (ROOT / "android-launcher/app/build.gradle.kts").read_text(encoding="utf-8")
         version = re.search(r'versionName = "([^"]+)"', gradle).group(1)
         self.assertRegex(version, r"^\d+(?:\.\d+)*-bionic-v\d+$")
-        self.assertIn('versionCode = 2010707', gradle)
+        self.assertIn('versionCode = 2010708', gradle)
 
     def test_shared_signing_key_is_pinned_and_validated(self):
         workflow = (ROOT / ".github/workflows/android.yml").read_text(encoding="utf-8")
@@ -56,6 +56,28 @@ class AndroidSaveDataContractTests(unittest.TestCase):
     def test_missing_open_logs_guest_and_host_paths(self):
         vfs = (ROOT / "src/runtime_file.c").read_text(encoding="utf-8")
         self.assertIn('Runtime: open(%s -> %s) -> not found (errno=%d)', vfs)
+
+    def test_savedata_mount_distinguishes_missing_from_other_stat_errors(self):
+        savedata = (ROOT / "src/runtime_savedata.c").read_text(encoding="utf-8")
+        self.assertIn("host_stat_errno!=ENOENT", savedata)
+        self.assertIn("SaveData mount stat failed:", savedata)
+        self.assertIn("SaveData mount request:", savedata)
+        self.assertIn("strerror(host_stat_errno)", savedata)
+
+    def test_savedata_search_logs_root_filter_and_discovered_saves(self):
+        savedata = (ROOT / "src/runtime_savedata.c").read_text(encoding="utf-8")
+        self.assertIn("SaveData search root unavailable:", savedata)
+        self.assertIn("SaveData search root missing:", savedata)
+        self.assertIn("SaveData search found:", savedata)
+        self.assertIn("SaveData search complete:", savedata)
+        self.assertIn("char pattern[33]", savedata)
+
+    def test_save_dialog_logs_existing_rows_and_cleans_stale_thumbnails(self):
+        services = (ROOT / "src/runtime_services.c").read_text(encoding="utf-8")
+        self.assertIn("SaveDataDialog open:", services)
+        self.assertIn("SaveDataDialog directory[%d]", services)
+        self.assertIn("Delete thumbnails left by the previous dialog", services)
+        self.assertIn('"%s.p%d"', services)
 
     def test_package_id_matches_runtime_manifest_and_apk_validator(self):
         gradle = (ROOT / "android-launcher/app/build.gradle.kts").read_text(encoding="utf-8")

@@ -22,8 +22,8 @@ android {
         applicationId = "com.alwansan.gow3.android"
         minSdk = 28
         targetSdk = 28
-        versionCode = 2010707
-        versionName = "2.1.7-bionic-v7"
+        versionCode = 2010708
+        versionName = "2.1.8-bionic-v8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
