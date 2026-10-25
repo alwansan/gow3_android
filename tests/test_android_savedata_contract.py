@@ -37,7 +37,7 @@ class AndroidSaveDataContractTests(unittest.TestCase):
     def test_version_name_is_compatible_with_update_checker(self):
         gradle = (ROOT / "android-launcher/app/build.gradle.kts").read_text(encoding="utf-8")
         version = re.search(r'versionName = "([^"]+)"', gradle).group(1)
-        self.assertRegex(version, r"^\\d+(?:\\.\\d+)*-bionic-v\\d+$")
+        self.assertRegex(version, r"^\d+(?:\.\d+)*-bionic-v\d+$")
         self.assertIn('versionCode = 2010705', gradle)
 
     def test_package_id_matches_runtime_manifest_and_apk_validator(self):
