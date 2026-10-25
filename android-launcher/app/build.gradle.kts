@@ -23,7 +23,7 @@ android {
         minSdk = 28
         targetSdk = 28
         versionCode = 2010705
-        versionName = "2.1.7-alwan-savefix1"
+        versionName = "2.1.7-bionic-v5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

@@ -34,6 +34,12 @@ class AndroidSaveDataContractTests(unittest.TestCase):
         self.assertIn("Runtime: stat(%s -> %s) -> not found", vfs)
         self.assertIn("Runtime: access(%s -> %s) -> not found", vfs)
 
+    def test_version_name_is_compatible_with_update_checker(self):
+        gradle = (ROOT / "android-launcher/app/build.gradle.kts").read_text(encoding="utf-8")
+        version = re.search(r'versionName = "([^"]+)"', gradle).group(1)
+        self.assertRegex(version, r"^\\d+(?:\\.\\d+)*-bionic-v\\d+$")
+        self.assertIn('versionCode = 2010705', gradle)
+
     def test_package_id_matches_runtime_manifest_and_apk_validator(self):
         gradle = (ROOT / "android-launcher/app/build.gradle.kts").read_text(encoding="utf-8")
         manifest = json.loads((ROOT / "tools/android/runtime/runtime-manifest.bionic.json").read_text(encoding="utf-8"))
